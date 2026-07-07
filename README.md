@@ -10,7 +10,7 @@ Built for PS2 homebrew development, game modding, and texture pipeline work, wit
 - **TIM2 → Image extraction**, converting `.tm2` files back into common image formats
 - **CLUT (palette) generation** for indexed formats, including proper 8-bit CLUT swizzling
 - **GS VRAM swizzle** support for 32-bit and 16-bit formats
-- **Mipmap chain generation** for 32-bit and 16-bit formats
+- **Mipmap chain generation** for all formats — 32-bit, 16-bit, 8-bit indexed, and 4-bit indexed
 - **Alpha premultiplication**, matching PS2 GS rendering behavior
 - **Floyd–Steinberg dithering** for 4-bit and 8-bit indexed output
 - **Power-of-2 dimension handling**, with optional automatic resize up or down
@@ -112,7 +112,7 @@ python3 ps2_tim2_tool.py (filename) --format 32bit --resize down
 python3 ps2_tim2_tool.py (filename) --format 32bit --swizzle
 ```
 
-### Generate a full mipmap chain (32-bit / 16-bit only)
+### Generate a full mipmap chain (all formats)
 
 ```
 python3 ps2_tim2_tool.py (filename) --format 32bit --mipmaps
@@ -189,7 +189,7 @@ python3 ps2_tim2_tool.py --list-formats
 | `--dither` | Enable Floyd–Steinberg dithering (4-bit and 8-bit) |
 | `--resize up` \| `down` | Resize non-power-of-2 images up or down to the nearest power of 2 |
 | `--swizzle` | Apply GS VRAM swizzle to pixel data (32-bit and 16-bit only) |
-| `--mipmaps` | Generate a full mipmap chain stored in the TIM2 file |
+| `--mipmaps` | Generate a full mipmap chain stored in the TIM2 file (all formats) |
 | `--info` | Read and display info from an existing `.tm2` file |
 | `--verify` | Verify the integrity of a `.tm2` file (12 checks) |
 | `--list` | Convert images listed in a text file (filename + format per line) |
@@ -209,10 +209,11 @@ When using `--list`, provide a plain text file with one entry per line, containi
 ## Notes
 
 - Non-power-of-2 images are still converted by default, with a warning. Use `--resize up` or `--resize down` to force power-of-2 dimensions.
-- The `--swizzle` and `--mipmaps` options apply only to `32bit` and `16bit` formats.
+- The `--swizzle` option applies only to `32bit` and `16bit` formats.
+- The `--mipmaps` option applies to all four formats (`32bit`, `16bit`, `8bit`, `4bit`).
 - The `--dither` option applies only to `4bit` and `8bit` formats.
 - When extracting a TIM2 file to a format without alpha support (`.jpg`, `.bmp`, `.ppm`), transparency is composited onto a white background.
 
 ## License
 
-Add your preferred license here.
+This project is licensed under the [MIT License](LICENSE) — see the `LICENSE` file for details.
