@@ -2,6 +2,9 @@
 
 ![PS2 TIM2 Tool demo](assets/demo.png)
 
+
+![TIM2 file proof](assets/demo_proof.png)
+
 A complete TIM2 (`.tm2`) texture toolkit for the PlayStation 2. Convert standard images into PS2-native TIM2 textures, extract existing TIM2 files back into regular images, inspect their internal structure, and verify their integrity — all from a single command-line script.
 
 Built for PS2 homebrew development, game modding, and texture pipeline work, with accurate handling of GS pixel formats, CLUT palettes, VRAM swizzling, and mipmap chains.
