@@ -1,0 +1,95 @@
+name: Build Executables
+
+
+on:
+  workflow_dispatch:
+
+
+permissions:
+  contents: write
+
+jobs:
+
+
+
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete existing release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          assets=$(gh release view v1.0.0 --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
+          if [ -z "$assets" ]; then
+            echo "There are currently no files uploaded for this version"
+          else
+            for name in $assets; do
+              echo "delete: $name"
+              gh release delete-asset v1.0.0 "$name" --repo "$GITHUB_REPOSITORY" -y
+            done
+          fi
+
+
+
+  build:
+    needs: cleanup
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x86_64
+            os: windows-latest
+            python-arch: x64
+            ext: ".exe"
+          - target: windows-x86_32
+            os: windows-latest
+            python-arch: x86
+            ext: ".exe"
+          - target: windows-arm64
+            os: windows-11-arm
+            python-arch: arm64
+            ext: ".exe"
+          - target: linux-x86_64
+            os: ubuntu-latest
+            python-arch: x64
+            ext: ""
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+            python-arch: arm64
+            ext: ""
+          - target: macos-x86_64
+            os: macos-13
+            python-arch: x64
+            ext: ""
+          - target: macos-arm64
+            os: macos-14
+            python-arch: arm64
+            ext: ""
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.python-arch }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller Pillow
+
+      - name: Build executable with PyInstaller
+        run: |
+          pyinstaller --onefile --name "ps2-tim2-tool-${{ matrix.target }}" ps2_tim2_tool.py
+
+      - name: Upload to v1.0.0 release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          FILE="dist/ps2-tim2-tool-${{ matrix.target }}${{ matrix.ext }}"
+          gh release upload v1.0.0 "$FILE" --repo "$GITHUB_REPOSITORY" --clobber
