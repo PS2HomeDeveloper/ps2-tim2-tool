@@ -7,7 +7,7 @@
 
 ![TIM2 file proof](assets/demo_proof.png)
 
-A complete TIM2 (`.tm2`) texture toolkit for the PlayStation 2. Convert standard images into PS2-native TIM2 textures, extract existing TIM2 files back into regular images, inspect their internal structure, and verify their integrity — all from a single command-line script.
+A complete TIM2 (`.tm2`) texture toolkit for the PlayStation 2. Convert standard images into PS2-native TIM2 textures, extract existing TIM2 files back into regular images, inspect their internal structure, verify their integrity, and diff two TIM2 files to check compatibility — all from a single command-line script.
 
 Built for PS2 homebrew development, game modding, and texture pipeline work, with accurate handling of GS pixel formats, CLUT palettes, VRAM swizzling, and mipmap chains.
 
@@ -24,6 +24,7 @@ Built for PS2 homebrew development, game modding, and texture pipeline work, wit
 - **Batch conversion** from wildcards or a text list file
 - **`.tm2` file inspection** (`--info`) showing header, format, CLUT, and GS Tex0 data
 - **`.tm2` integrity verification** (`--verify`) with a 12-point structural check
+- **`.tm2` diff / compatibility check** (`--diff`) comparing an original file against a modified one — format, dimensions, file size, transparency, and pixel-level changes, with a SAFE / WARNING / UNSAFE verdict
 
 ## Requirements
 
@@ -154,6 +155,30 @@ python3 ps2_tim2_tool.py (filename) --info
 python3 ps2_tim2_tool.py (filename) --verify
 ```
 
+### Compare an original TIM2 against a modified one
+
+```
+python3 ps2_tim2_tool.py --diff --original (filename) --modified (filename)
+```
+
+### Compare multiple file pairs at once
+
+```
+python3 ps2_tim2_tool.py --diff --original (filename) (filename) --modified (filename) (filename)
+```
+
+### Compare two entire folders of TIM2 files
+
+```
+python3 ps2_tim2_tool.py --diff --original (directory) --modified (directory)
+```
+
+### Compare using a text list of file pairs
+
+```
+python3 ps2_tim2_tool.py --diff-list (filename)
+```
+
 ### Extract a TIM2 file back into an image
 
 ```
@@ -204,6 +229,10 @@ python3 ps2_tim2_tool.py --list-formats
 | `--mipmaps` | Generate a full mipmap chain stored in the TIM2 file (all formats) |
 | `--info` | Read and display info from an existing `.tm2` file |
 | `--verify` | Verify the integrity of a `.tm2` file (12 checks) |
+| `--diff` | Compare an original TIM2 file (or folder) against a modified one |
+| `--original PATH ...` | One or more original TIM2 files, or one folder (used with `--diff`) |
+| `--modified PATH ...` | One or more modified TIM2 files, or one folder (used with `--diff`) |
+| `--diff-list FILE.TXT` | Text file listing original/modified pairs to compare, one pair per line |
 | `--list` | Convert images listed in a text file (filename + format per line) |
 | `--extract` | Extract TIM2 to an image format |
 | `--list-formats`, `-l` | List available formats and options |
@@ -219,6 +248,38 @@ When using `--list`, provide a plain text file with one entry per line, containi
 (filename) 8bit
 ```
 
+## Diff List File Format
+
+When using `--diff-list`, provide a plain text file with a header line followed by one original/modified pair per line:
+
+```
+original              modified
+(filename)             (filename)
+(filename)             (filename)
+```
+
+Blank lines and lines starting with `#` are ignored.
+
+## Diff / Compatibility Report
+
+Running `--diff` prints a per-file report checking:
+
+- **Format** — whether the pixel format changed
+- **Dimensions** — whether width or height changed
+- **File size** — before and after, with the difference
+- **Transparency** — whether an alpha channel was lost, gained, or unchanged
+- **Pixel diff** — percentage of pixels changed and the maximum color difference (only when format and dimensions match)
+
+Each file gets a final verdict:
+
+| Verdict | Meaning |
+|---|---|
+| `SAFE` | No issues or warnings — safe to inject back into the game |
+| `WARNING` | No blocking issues, but review the warnings (e.g. file size or transparency changed) |
+| `UNSAFE` | Format or dimensions changed — the game may crash or render incorrectly |
+
+Comparing two folders also reports any files present in one folder but missing from the other, plus a summary count of SAFE / WARNING / UNSAFE results across all compared files.
+
 ## Notes
 
 - Non-power-of-2 images are still converted by default, with a warning. Use `--resize up` or `--resize down` to force power-of-2 dimensions.
@@ -227,6 +288,7 @@ When using `--list`, provide a plain text file with one entry per line, containi
 - The `--dither` option applies only to `4bit` and `8bit` formats.
 - The `24bit` format stores no alpha channel — every pixel is fully opaque, so `--no-premult` and `--swizzle` have no effect on it.
 - When extracting a TIM2 file to a format without alpha support (`.jpg`, `.bmp`, `.ppm`), transparency is composited onto a white background.
+- `--diff` requires either `--diff-list`, or both `--original` and `--modified` together.
 
 ## Releases
 
