@@ -1,5 +1,7 @@
 # PS2 TIM2 Tool
 
+⭐ If this tool saved you time, consider starring the repo — it helps others find it too.
+
 ![PS2 TIM2 Tool demo](assets/demo.png)
 
 
