@@ -7,23 +7,23 @@
 ╚══════════════════════════════════════════════════════════════════════╝
 
 Usage:
-  python3 ps2_tim2_tool.py <image(s)> --format <fmt> [options]
-  python3 ps2_tim2_tool.py <file.tm2> --info
-  python3 ps2_tim2_tool.py <file.tm2> --verify
-  python3 ps2_tim2_tool.py --list convert.txt
+  {PROG} <image(s)> --format <fmt> [options]
+  {PROG} <file.tm2> --info
+  {PROG} <file.tm2> --verify
+  {PROG} --list convert.txt
 
 Examples:
-  python3 ps2_tim2_tool.py hero.png    --format 32bit
-  python3 ps2_tim2_tool.py bg.jpg      --format 16bit
-  python3 ps2_tim2_tool.py sprite.bmp  --format 8bit  --dither
-  python3 ps2_tim2_tool.py icon.tga    --format 4bit
-  python3 ps2_tim2_tool.py *.png *.jpg --format 32bit
-  python3 ps2_tim2_tool.py tex.png     --format 32bit --no-premult
-  python3 ps2_tim2_tool.py img.png     --format 8bit  --output out.tm2
-  python3 ps2_tim2_tool.py font1.tm2   --info
-  python3 ps2_tim2_tool.py --list textures.txt
-  python3 ps2_tim2_tool.py font1.tm2   --extract png
-  python3 ps2_tim2_tool.py             --list-formats
+  {PROG} hero.png    --format 32bit
+  {PROG} bg.jpg      --format 16bit
+  {PROG} sprite.bmp  --format 8bit  --dither
+  {PROG} icon.tga    --format 4bit
+  {PROG} *.png *.jpg --format 32bit
+  {PROG} tex.png     --format 32bit --no-premult
+  {PROG} img.png     --format 8bit  --output out.tm2
+  {PROG} font1.tm2   --info
+  {PROG} --list textures.txt
+  {PROG} font1.tm2   --extract png
+  {PROG}             --list-formats
 """
 
 import argparse
@@ -34,7 +34,7 @@ import warnings
 from pathlib import Path
 from PIL import Image
 
-# ─── Suppress Pillow internal deprecation warnings (getdata removed in Pillow 14) ─
+# ─── Ignore internal Pillow warnings (getdata is deprecated in Pillow 14) ───
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 
@@ -42,9 +42,10 @@ def _prog_name() -> str:
     """
     Detect the correct program name based on how the tool is invoked.
     ┌──────────────────────────────────────────────────────────────────┐
-    │  python3 ps2_tim2_tool.py  →  "python3 ps2_tim2_tool.py"        │
+    │  {PROG}  →  "{PROG}"        │
     │  ./ps2-tim2-tool-linux     →  "./ps2-tim2-tool-linux"           │
     │  ps2-tim2-tool (in PATH)   →  "ps2-tim2-tool"                   │
+    │  ps2-tim2-tool.exe         →  "ps2-tim2-tool.exe"               │
     └──────────────────────────────────────────────────────────────────┘
     """
     import os
@@ -52,9 +53,13 @@ def _prog_name() -> str:
 
     argv0 = sys.argv[0]
     base  = os.path.basename(argv0)
+
+    # Running as a Python script: show "python3 <scriptname>"
     if base.endswith('.py'):
         py = os.path.basename(sys.executable)
         return f"{py} {base}"
+
+    # Running as a compiled executable (PyInstaller / ELF / EXE)
     return base
 
 
@@ -62,25 +67,25 @@ PROG = _prog_name()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Supported input formats  (convert TO TIM2)
+#  Accepted input image formats (for conversion to TIM2)
 # ══════════════════════════════════════════════════════════════════════════════
 #
 #  Total: 14 formats
 #  ┌─────────────────────────────────────────────────────────────────────┐
-#  │  .png   — Portable Network Graphics       (common, supports Alpha)  │
-#  │  .jpg   — JPEG                            (common, no Alpha)        │
+#  │  .png   — Portable Network Graphics       (common, supports Alpha) │
+#  │  .jpg   — JPEG                            (common, no Alpha)       │
 #  │  .jpeg  — JPEG (alternate extension)                                │
 #  │  .bmp   — Windows Bitmap                  (uncompressed)            │
-#  │  .tga   — Targa                           (common in PS2 games)     │
+#  │  .tga   — Targa                           (common in PS2 games)    │
 #  │  .tiff  — Tagged Image File Format        (high quality)            │
 #  │  .tif   — TIFF (alternate extension)                                │
 #  │  .webp  — WebP                            (modern compression)      │
-#  │  .gif   — Graphics Interchange Format     (first frame only)        │
+#  │  .gif   — Graphics Interchange Format     (only first frame used)  │
 #  │  .ppm   — Portable Pixmap                 (uncompressed)            │
 #  │  .pgm   — Portable Graymap                (grayscale)               │
 #  │  .pbm   — Portable Bitmap                 (black and white)         │
-#  │  .ico   — Windows Icon                    (largest frame used)      │
-#  │  .dds   — DirectDraw Surface              (direct textures)         │
+#  │  .ico   — Windows Icon                    (largest frame used)     │
+#  │  .dds   — DirectDraw Surface              (direct textures)        │
 #  └─────────────────────────────────────────────────────────────────────┘
 SUPPORTED_EXTENSIONS = {
     '.png', '.jpg', '.jpeg', '.bmp', '.tga', '.tiff', '.tif',
@@ -89,72 +94,152 @@ SUPPORTED_EXTENSIONS = {
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TIM2 Constants  —  directly from Sony specifications
+#  TIM2 constants — taken directly from Sony's spec
 # ══════════════════════════════════════════════════════════════════════════════
 
 TIM2_MAGIC   = b'TIM2'
 TIM2_VERSION = 0x04
-TIM2_ALIGN   = 128          # Every Picture Block is aligned to 128 bytes
+TIM2_ALIGN   = 128          # every Picture Block is aligned to 128 bytes
 
-# ─── Image Type  (byte 18 in Picture Block Header) ──────────────────────────
-IMG_RGBA32        = 0x00         # 32-bit full RGBA
-IMG_RGBA16        = 0x01         # 16-bit RGBA5551
-IMG_RGB24         = 0x02         # 24-bit RGB (no Alpha)
-IMG_INDEXED8      = 0x05         # 8-bit Indexed
-IMG_INDEXED4      = 0x06         # 4-bit Indexed (standard)
-IMG_INDEXED4_SONY = 0x03         # 4-bit Indexed (Sony variant — e.g. Dark Cloud)
+# ─── Image Type  (byte 18 in the Picture Block Header) ───────────────────────
+IMG_RGBA32        = 0x00    # 32-bit full RGBA
+IMG_RGBA16        = 0x01    # 16-bit RGBA5551
+IMG_RGB24         = 0x02    # 24-bit RGB (no Alpha)
+IMG_INDEXED8      = 0x05    # 8-bit Indexed
+IMG_INDEXED4      = 0x06    # 4-bit Indexed (standard)
+IMG_INDEXED4_SONY = 0x03    # 4-bit Indexed (Sony variant — e.g. Dark Cloud)
 
-# ─── CLUT Type  (byte 17 in Picture Block Header) ───────────────────────────
-CLUT_NONE   = 0x00          # No CLUT  (32-bit and 16-bit)
+# ─── CLUT Type  (byte 17 in the Picture Block Header) ─────────────────────────
+CLUT_NONE   = 0x00          # no CLUT  (32-bit and 16-bit)
 CLUT_RGBA32 = 0x02          # CLUT in RGBA32 format
 
-# ─── GS Pixel Storage Modes  (from official GS specifications) ──────────────
+# ─── GS Pixel Storage Modes  (from the official GS spec) ─────────────────────
 GS_PSM_CT32 = 0x00          # 32-bit RGBA8888
 GS_PSM_CT16 = 0x02          # 16-bit RGBA5551
-GS_PSM_T8   = 0x13          # 8-bit Indexed
-GS_PSM_T4   = 0x14          # 4-bit Indexed
+GS_PSM_T8   = 0x13          # 8-bit indexed
+GS_PSM_T4   = 0x14          # 4-bit indexed
 
-# ─── GS CLUT Pixel Storage Mode ─────────────────────────────────────────────
+# ─── GS CLUT Pixel Storage Mode ──────────────────────────────────────────────
 GS_CPSM_CT32 = 0x00         # CLUT in 32-bit format (default)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Core Helper Functions
+#  Core helper functions
 # ══════════════════════════════════════════════════════════════════════════════
 
 def align_up(size: int, alignment: int) -> int:
-    """Round size up to the nearest multiple of alignment."""
+    """Rounds size up to the nearest multiple of alignment."""
     return (size + alignment - 1) & ~(alignment - 1)
 
 
 def ps2_alpha(a: int) -> int:
     """
-    Convert Alpha from standard range (0-255) to PS2 range (0-0x80).
+    Converts Alpha from the standard range (0-255) to the PS2 range (0-0x80).
     ┌──────────────────────────────────────────────────────┐
-    │  PS2 uses 0x80 (128) as full alpha, not 0xFF          │
-    │  Formula:  round(a × 128 / 255)                       │
+    │  PS2 uses 0x80 (128) as full alpha, not 0xFF        │
+    │  Correct formula:  round(a × 128 / 255)              │
     └──────────────────────────────────────────────────────┘
     """
     return round(a * 128 / 255)
 
 
+def pack_ps2_5551(r5: int, g5: int, b5: int, a: int) -> int:
+    """
+    Packs already-computed 5-bit components (0-31) into the final 16-bit
+    PS2 GS value. Unlike PS1, PS2 GS has no "0x0000 = always transparent"
+    rule — transparency here is determined solely by the A bit via the
+    GS's ALPHA register, so no special handling of the color black is
+    needed.
+    """
+    a1 = 1 if a >= 128 else 0
+    return (a1 << 15) | ((b5 & 0x1F) << 10) | ((g5 & 0x1F) << 5) | (r5 & 0x1F)
+
+
 def rgba_to_16bit(r: int, g: int, b: int, a: int) -> int:
     """
-    Convert RGBA8888 → RGBA5551 in PS2 format (Little Endian).
+    Converts RGBA8888 → RGBA5551 in PS2 format (Little Endian).
     ┌─────────────────────────────────────┐
-    │  Bit layout:  A(1) B(5) G(5) R(5)   │
+    │  Bit order:  A(1) B(5) G(5) R(5)    │
     └─────────────────────────────────────┘
+    Rounding accuracy: round(v * 31 / 255) instead of the raw shift
+    (v >> 3). The raw shift drops the lowest 3 bits with no rounding at
+    all, so it always truncates every channel downward (a systematic
+    quantization bias of up to 7/255), while round() gives the actual
+    nearest value to the source with roughly half the average error —
+    which is what any professional export tool that cares about color
+    accuracy follows.
     """
-    r5 = (r >> 3) & 0x1F
-    g5 = (g >> 3) & 0x1F
-    b5 = (b >> 3) & 0x1F
-    a1 = 1 if a >= 128 else 0
-    return (a1 << 15) | (b5 << 10) | (g5 << 5) | r5
+    r5 = min(31, max(0, round(r * 31 / 255)))
+    g5 = min(31, max(0, round(g * 31 / 255)))
+    b5 = min(31, max(0, round(b * 31 / 255)))
+    return pack_ps2_5551(r5, g5, b5, a)
+
+
+def dither_16bit_channels(img: Image.Image) -> Image.Image:
+    """
+    Serpentine Floyd-Steinberg dithering applied directly to the R/G/B
+    channels, dedicated to the direct 16-bit format (RGBA5551) which has
+    no CLUT for Pillow to rely on — without this diffusion, packing the
+    channel directly with no distributed rounding produces visible
+    banding in smooth gradients (sky, lighting...).
+    Result: an image that already carries ready 5-bit indices (0-31)
+    inside its R/G/B channels, while the A channel is left as-is (it has
+    no relation to color quality).
+    """
+    img = img.convert('RGBA')
+    w, h = img.size
+    src = img.load()
+
+    err_r = [[0.0] * (w + 2) for _ in range(2)]
+    err_g = [[0.0] * (w + 2) for _ in range(2)]
+    err_b = [[0.0] * (w + 2) for _ in range(2)]
+
+    out = Image.new('RGBA', (w, h))
+    dst = out.load()
+    step = 255.0 / 31.0
+
+    for y in range(h):
+        cur_r, nxt_r = err_r[y % 2], err_r[(y + 1) % 2]
+        cur_g, nxt_g = err_g[y % 2], err_g[(y + 1) % 2]
+        cur_b, nxt_b = err_b[y % 2], err_b[(y + 1) % 2]
+        for i in range(w + 2):
+            nxt_r[i] = 0.0
+            nxt_g[i] = 0.0
+            nxt_b[i] = 0.0
+
+        left_to_right = (y % 2 == 0)
+        xs = range(w) if left_to_right else range(w - 1, -1, -1)
+        for x in xs:
+            r, g, b, a = src[x, y]
+            r_adj = r + cur_r[x + 1]
+            g_adj = g + cur_g[x + 1]
+            b_adj = b + cur_b[x + 1]
+
+            r5 = min(31, max(0, round(r_adj / step)))
+            g5 = min(31, max(0, round(g_adj / step)))
+            b5 = min(31, max(0, round(b_adj / step)))
+
+            dst[x, y] = (r5, g5, b5, a)
+
+            er = r_adj - r5 * step
+            eg = g_adj - g5 * step
+            eb = b_adj - b5 * step
+
+            d = 1 if left_to_right else -1
+            fwd, back = x + 1 + d, x + 1 - d
+            cur_r[fwd] += er * 7 / 16; nxt_r[back] += er * 3 / 16
+            nxt_r[x + 1] += er * 5 / 16; nxt_r[fwd] += er * 1 / 16
+            cur_g[fwd] += eg * 7 / 16; nxt_g[back] += eg * 3 / 16
+            nxt_g[x + 1] += eg * 5 / 16; nxt_g[fwd] += eg * 1 / 16
+            cur_b[fwd] += eb * 7 / 16; nxt_b[back] += eb * 3 / 16
+            nxt_b[x + 1] += eb * 5 / 16; nxt_b[fwd] += eb * 1 / 16
+
+    return out
 
 
 def open_any_image(path: Path) -> Image.Image:
     """
-    Open any supported image format.
+    Opens any supported image format.
     Raises ValueError clearly if the extension is unsupported.
     """
     ext = path.suffix.lower()
@@ -168,10 +253,10 @@ def open_any_image(path: Path) -> Image.Image:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  --info  —  Read and display info from an existing TIM2 file
+#  --info  —  reading and displaying info about an existing TIM2 file
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ─── Image Type → human-readable name ───────────────────────────────────────
+# ─── Image Type → readable name table ────────────────────────────────────────
 _IMG_TYPE_NAME = {
     0x00: '32-bit RGBA8888',
     0x01: '16-bit RGBA5551',
@@ -180,7 +265,7 @@ _IMG_TYPE_NAME = {
     0x06: '4-bit  Indexed (16  colors)',
 }
 
-# ─── CLUT Type → human-readable name ────────────────────────────────────────
+# ─── CLUT Type → readable name table ──────────────────────────────────────────
 _CLUT_TYPE_NAME = {
     0x00: 'none',
     0x01: 'RGBA5551',
@@ -189,10 +274,10 @@ _CLUT_TYPE_NAME = {
 
 def tim2_info(path: Path) -> None:
     """
-    Read the TIM2 file header and display its information in detail.
+    Reads a TIM2 file's header and displays detailed information.
     ┌────────────────────────────────────────────────────────────────────┐
-    │  Reads:    File Header (16 bytes) + Picture Block Header (48 bytes) │
-    │  Displays: format, dimensions, size, CLUT, GsTex0, power-of-2 status│
+    │  Reads:     File Header (16 bytes) + Picture Block Header (48 bytes) │
+    │  Displays:  format, dimensions, size, CLUT, GsTex0, power-of-2 status │
     └────────────────────────────────────────────────────────────────────┘
     """
     if not path.exists():
@@ -201,16 +286,16 @@ def tim2_info(path: Path) -> None:
     data = path.read_bytes()
     size_bytes = len(data)
 
-    # ─── Validate Magic Number ───────────────────────────────────────────────
+    # ─── Check the Magic Number ────────────────────────────────────────────────
     if data[:4] != b'TIM2':
         raise ValueError(f"Not a valid TIM2 file: {path.name}")
 
-    # ─── File Header (16 bytes) ──────────────────────────────────────────────
+    # ─── File Header (16 bytes) ───────────────────────────────────────────────
     version  = data[4]
     fmt_byte = data[5]
     num_pics = struct.unpack_from('<H', data, 6)[0]
 
-    # ─── Picture Block Header (offset 16, size 48) ──────────────────────────
+    # ─── Picture Block Header (offset 16, size 48) ────────────────────────────
     off = 16
     block_total  = struct.unpack_from('<I', data, off +  0)[0]
     clut_size    = struct.unpack_from('<I', data, off +  4)[0]
@@ -238,7 +323,7 @@ def tim2_info(path: Path) -> None:
     csm  = (gs_tex0 >> 55) & 0x1
     cld  = (gs_tex0 >> 61) & 0x7
 
-    # ─── Human-readable names ────────────────────────────────────────────────
+    # ─── Readable names ────────────────────────────────────────────────────────
     fmt_name  = _IMG_TYPE_NAME.get(img_type,  f'Unknown (0x{img_type:02X})')
     clut_name = _CLUT_TYPE_NAME.get(clut_type, f'Unknown (0x{clut_type:02X})')
     w_ok = is_power_of_2(width)
@@ -281,12 +366,12 @@ def tim2_info(path: Path) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  --list  —  Batch conversion from a text file
+#  --list  —  batch conversion from a text file
 # ══════════════════════════════════════════════════════════════════════════════
 
 def read_list_file(list_path: Path) -> list:
     """
-    Read a text file containing image filenames and their target format.
+    Reads a text file containing image filenames and each one's format.
     ┌──────────────────────────────────────────────────────────────────┐
     │  Line format:  <filename>  <format>                              │
     │  Example:                                                        │
@@ -296,9 +381,9 @@ def read_list_file(list_path: Path) -> list:
     │      sprite.tga  8bit                                            │
     │                                                                  │
     │  Rules:                                                          │
-    │  • Blank lines are ignored                                       │
-    │  • Lines starting with # are treated as comments                 │
-    │  • Valid formats: 4bit | 8bit | 16bit | 32bit                    │
+    │  • blank lines are ignored                                       │
+    │  • a leading # on a line = comment, ignored                     │
+    │  • accepted formats: 4bit | 8bit | 16bit | 32bit                │
     └──────────────────────────────────────────────────────────────────┘
     """
     if not list_path.exists():
@@ -331,16 +416,16 @@ def read_list_file(list_path: Path) -> list:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Power-of-2  —  Dimension validation and correction
+#  Power-of-2  —  checking and correcting dimensions
 # ══════════════════════════════════════════════════════════════════════════════
 
 def is_power_of_2(n: int) -> bool:
-    """Return True if n is a valid power of two (8, 16, 32, 64, 128, 256, 512 ...)."""
+    """Checks whether the number is a proper power of 2 (8, 16, 32, 64, 128, 256, 512 ...)."""
     return n > 0 and (n & (n - 1)) == 0
 
 
 def prev_power_of_2(n: int) -> int:
-    """Return the largest power of two less than or equal to n."""
+    """Nearest power of 2 less than or equal to n."""
     if n <= 0:
         return 1
     p = 1
@@ -350,7 +435,7 @@ def prev_power_of_2(n: int) -> int:
 
 
 def next_power_of_2(n: int) -> int:
-    """Return the smallest power of two greater than or equal to n."""
+    """Nearest power of 2 greater than or equal to n."""
     if n <= 0:
         return 1
     p = 1
@@ -361,12 +446,13 @@ def next_power_of_2(n: int) -> int:
 
 def check_and_warn_dimensions(name: str, w: int, h: int) -> None:
     """
-    Check image dimensions and print a detailed warning if not power-of-2.
+    Checks the image dimensions and prints a detailed warning if they are
+    not powers of 2.
     ┌──────────────────────────────────────────────────────────────────┐
     │  PS2 GS requires power-of-2 dimensions (8, 16, 32, 64, 128 ...) │
-    │  Non-conforming dimensions may cause:                            │
+    │  Irregular dimensions can cause:                                 │
     │  • texture distortion                                            │
-    │  • incorrect TBW calculation inside GsTex0                       │
+    │  • errors computing TBW inside GsTex0                           │
     │  • undefined behavior on real hardware                           │
     └──────────────────────────────────────────────────────────────────┘
     """
@@ -374,13 +460,13 @@ def check_and_warn_dimensions(name: str, w: int, h: int) -> None:
     h_ok = is_power_of_2(h)
 
     if w_ok and h_ok:
-        return   # Dimensions are valid — no warning needed
+        return   # dimensions are fine — no warning
 
     lines = [f"  WARNING: '{name}' has non-power-of-2 dimensions ({w}x{h})."]
     lines.append(  "           PS2 requires power-of-2 sizes for correct rendering.")
     lines.append(  "           Suggested alternatives:")
 
-    # ─── Suggest valid power-of-2 sizes for each non-conforming dimension ──
+    # ─── Suggest regular dimensions for each incorrect dimension ────────────
     for dim_name, val, ok in (('width', w, w_ok), ('height', h, h_ok)):
         if not ok:
             lo = prev_power_of_2(val)
@@ -395,12 +481,12 @@ def check_and_warn_dimensions(name: str, w: int, h: int) -> None:
 
 def resize_to_power_of_2(img: Image.Image, mode: str) -> Image.Image:
     """
-    Resize the image to power-of-2 dimensions.
+    Resizes the image to regular (power-of-2) dimensions.
     ┌─────────────────────────────────────────────────────┐
-    │  mode='up'   → scale up   to the next power-of-2     │
-    │  mode='down' → scale down to the prev power-of-2     │
+    │  mode='up'   → round up    (next power-of-2)        │
+    │  mode='down' → round down  (prev power-of-2)        │
     │                                                     │
-    │  Uses LANCZOS resampling for highest quality.         │
+    │  Uses LANCZOS for the highest quality when resizing. │
     └─────────────────────────────────────────────────────┘
     """
     w, h = img.size
@@ -409,39 +495,39 @@ def resize_to_power_of_2(img: Image.Image, mode: str) -> Image.Image:
     nh   = fn(h)
 
     if nw == w and nh == h:
-        return img   # No resize needed
+        return img   # no change needed
 
     print(f"  Resized:  {w}x{h}  ->  {nw}x{nh}  ({mode})")
     return img.resize((nw, nh), Image.LANCZOS)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  GsTex0  —  Full computation of the 64-bit GS Register
+#  GsTex0  —  full computation of the 64-bit GS register
 # ══════════════════════════════════════════════════════════════════════════════
 
 def compute_gs_tex0(width: int, height: int, psm: int,
                     cpsm: int = GS_CPSM_CT32, cbp: int = 0) -> int:
     """
-    Build the complete GsTex0 Register value (64-bit) per GS specifications.
+    Builds the full (64-bit) GsTex0 register value per the GS spec.
     ┌──────────────────────────────────────────────────────────────┐
-    │  Bits        Field   Description                              │
+    │  Bit         Field    Description                            │
     │  ─────────  ───────  ──────────────────────────────────────  │
-    │  [13:0]     TBP0     Texture Base Pointer  (= 0 in file)    │
-    │  [19:14]    TBW      Buffer width in 64-pixel units          │
+    │  [13:0]     TBP0     Texture Base Pointer  (= 0 in the file) │
+    │  [19:14]    TBW      Buffer width in units of 64 pixels      │
     │  [25:20]    PSM      Pixel Storage Mode                      │
     │  [29:26]    TW       log2(width)  rounded up                 │
     │  [33:30]    TH       log2(height) rounded up                 │
-    │  [34]       TCC      1 = Alpha channel enabled               │
+    │  [34]       TCC      1 = uses the Alpha channel               │
     │  [36:35]    TFX      0 = MODULATE (default)                  │
-    │  [50:37]    CBP      CLUT Base Pointer  (= 0 in file)       │
+    │  [50:37]    CBP      CLUT Base Pointer  (= 0 in the file)    │
     │  [54:51]    CPSM     CLUT Pixel Storage Mode                 │
-    │  [55]       CSM      0 = CSM1 (default CLUT order)           │
+    │  [55]       CSM      0 = CSM1 (default CLUT layout)          │
     │  [60:56]    CSA      CLUT Entry Offset = 0                   │
-    │  [63:61]    CLD      1 = load CLUT on first use              │
+    │  [63:61]    CLD      1 = load CLUT on first use               │
     └──────────────────────────────────────────────────────────────┘
-    Note: TBP0 and CBP are assigned at runtime → stored as 0 in the file.
+    Note: TBP0 and CBP are assigned at runtime → we set them to 0 in the file.
     """
-    # ─── TBW: Buffer width per PSM ──────────────────────────────────────────
+    # ─── TBW: Buffer width based on PSM ─────────────────────────────────────
     tbw_map = {
         GS_PSM_CT32: align_up(width,  64) // 64,
         GS_PSM_CT16: align_up(width,  64) // 64,
@@ -450,31 +536,31 @@ def compute_gs_tex0(width: int, height: int, psm: int,
     }
     tbw = max(1, tbw_map.get(psm, align_up(width, 64) // 64))
 
-    # ─── TW, TH: log2 of dimensions (rounded up to nearest power-of-2) ─────
+    # ─── TW, TH: log2 of the dimensions (rounded to the nearest power of 2) ──
     tw = max(0, math.ceil(math.log2(max(width,  1))))
     th = max(0, math.ceil(math.log2(max(height, 1))))
 
     v  = 0
-    v |= (0    & 0x3FFF) <<  0   # TBP0  = 0  (set at runtime)
+    v |= (0    & 0x3FFF) <<  0   # TBP0  = 0
     v |= (tbw  & 0x3F)   << 14   # TBW
     v |= (psm  & 0x3F)   << 20   # PSM
     v |= (tw   & 0xF)    << 26   # TW
     v |= (th   & 0xF)    << 30   # TH
     v |= (1    & 0x1)    << 34   # TCC   = 1  (Alpha enabled)
-    v |= (0    & 0x3)    << 35   # TFX   = MODULATE (default)
-    v |= (cbp  & 0x3FFF) << 37   # CBP   = 0  (set at runtime)
+    v |= (0    & 0x3)    << 35   # TFX   = MODULATE
+    v |= (cbp  & 0x3FFF) << 37   # CBP   = 0
     v |= (cpsm & 0xF)    << 51   # CPSM
-    v |= (0    & 0x1)    << 55   # CSM   = CSM1 (default CLUT order)
-    v |= (0    & 0x1F)   << 56   # CSA   = 0  (no CLUT offset)
-    v |= (1    & 0x7)    << 61   # CLD   = 1  (load CLUT on first use)
+    v |= (0    & 0x1)    << 55   # CSM   = CSM1
+    v |= (0    & 0x1F)   << 56   # CSA   = 0
+    v |= (1    & 0x7)    << 61   # CLD   = 1
     return v & 0xFFFFFFFFFFFFFFFF
 
 
 def compute_gs_texclut(cbw: int = 1, cou: int = 0, cov: int = 0) -> int:
     """
-    GsTexClut Register — specifies the CLUT location in VRAM.
+    GsTexClut Register — specifies the CLUT's location in VRAM.
     ┌──────────────────────────────────────────────────────┐
-    │  CBW = 1  →  CLUT buffer width = 64 pixels            │
+    │  CBW = 1  →  CLUT buffer width = 64 pixels           │
     │  COU, COV = 0  →  no offset                           │
     └──────────────────────────────────────────────────────┘
     """
@@ -493,18 +579,18 @@ def premultiply_alpha(img: Image.Image) -> Image.Image:
     Alpha Premultiplication:  R' = R×A/255 ,  G' = G×A/255 ,  B' = B×A/255
     ┌──────────────────────────────────────────────────────────────────────┐
     │  Why?                                                                │
-    │  PS2 GS blends colors using:                                         │
+    │  The PS2 GS blends colors using the formula:                        │
     │      Output = Src × Src.A  +  Dst × (1 − Src.A)                     │
-    │  Without premult, dark fringing appears around transparent shapes.   │
+    │  Without premult, dark fringing appears around transparent shapes.  │
     │                                                                      │
-    │  When to disable (--no-premult)?                                      │
-    │  When you control blend mode manually in your game code.              │
+    │  When to disable it (--no-premult)?                                  │
+    │  If you control the blend mode manually in the game's code.         │
     └──────────────────────────────────────────────────────────────────────┘
     """
     img = img.convert('RGBA')
     r, g, b, a = img.split()
 
-    # ─── Inner function: multiply each channel by Alpha ─────────────────────
+    # ─── Internal helper: multiplies each channel by Alpha ───────────────────
     def _mul_channel(ch: Image.Image) -> Image.Image:
         ch_vals = list(ch.getdata())
         a_vals  = list(a.getdata())
@@ -517,25 +603,25 @@ def premultiply_alpha(img: Image.Image) -> Image.Image:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Quantization  —  Color reduction for indexed images (4-bit and 8-bit)
+#  Quantization — color reduction for indexed images (4-bit and 8-bit)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def quantize_best(img_rgba: Image.Image, num_colors: int,
                   use_dither: bool = False) -> Image.Image:
     """
-    Reduce colors using MEDIANCUT with optional Floyd-Steinberg Dithering.
+    Color reduction using MEDIANCUT with optional Floyd-Steinberg Dithering.
     ┌──────────────────────────────────────────────────────────────────┐
-    │  MEDIANCUT (method=1) is better than Octree because:            │
-    │  • distributes colors more evenly across color space            │
-    │  • produces better visual results for natural images            │
+    │  MEDIANCUT (method=1) is better than Octree because:             │
+    │  • it distributes colors more evenly across color space          │
+    │  • it gives better visual results for natural images             │
     │                                                                  │
-    │  Pillow requires RGB for MEDIANCUT → convert temporarily,      │
-    │  save Alpha separately, then merge it back into the CLUT.      │
+    │  Pillow requires RGB for MEDIANCUT → we convert temporarily and  │
+    │  save Alpha separately, then merge it back into the CLUT later.  │
     └──────────────────────────────────────────────────────────────────┘
     """
     dither_mode = Image.Dither.FLOYDSTEINBERG if use_dither else Image.Dither.NONE
 
-    # ─── Paste onto white background because MEDIANCUT does not accept RGBA ─
+    # ─── Paste onto a white background because MEDIANCUT doesn't accept RGBA directly ───
     bg = Image.new('RGB', img_rgba.size, (255, 255, 255))
     bg.paste(img_rgba.convert('RGB'), mask=img_rgba.split()[3])
     return bg.quantize(colors=num_colors, method=1, dither=dither_mode)
@@ -545,16 +631,16 @@ def extract_alpha_per_index(img_rgba: Image.Image,
                              img_q:    Image.Image,
                              num_colors: int) -> dict:
     """
-    Extract the average real Alpha value for each color in the palette.
+    Extracts the real average Alpha for each color in the palette.
     ┌──────────────────────────────────────────────────────┐
-    │  More accurate than a fixed value (0x80) for all colors:  │
-    │  computes the average from all pixels using that color.   │
+    │  More accurate than a fixed value (0x80) for all colors: │
+    │  computes the average from every pixel using that color. │
     └──────────────────────────────────────────────────────┘
     """
     alpha_data = list(img_rgba.split()[3].getdata())
     index_data = list(img_q.getdata())
 
-    # ─── Collect alpha values per palette color ──────────────────────────────
+    # ─── Group Alpha values for each color in the palette ────────────────────
     color_alpha: dict = {}
     for px_idx, a in zip(index_data, alpha_data):
         color_alpha.setdefault(px_idx, []).append(a)
@@ -567,19 +653,19 @@ def extract_alpha_per_index(img_rgba: Image.Image,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CLUT Swizzle for 8-bit  —  Mandatory CSM1 ordering for PS2
+#  8-bit CLUT Swizzle — the CSM1 ordering mandatory for PS2
 # ══════════════════════════════════════════════════════════════════════════════
 
 def clut8_swizzle(palette: list) -> list:
     """
-    Reorder the 8-bit CLUT according to the PS2 CSM1 swizzle pattern.
+    Reorders the 8-bit CLUT according to PS2's CSM1 layout.
     ┌──────────────────────────────────────────────────────────────┐
-    │  The CLUT is divided into blocks of 32 colors each.            │
+    │  The CLUT is divided into blocks of 32 colors.               │
     │  Each block = 4 stripes of 8 colors.                          │
     │  Original order:  stripe 0 , 1 , 2 , 3                       │
     │  PS2 order:       stripe 0 , 2 , 1 , 3                       │
     │                                                              │
-    │  NOTE: Without this swizzle, colors appear wrong in-game.     │
+    │  NOTE: without this swizzle, colors appear wrong in-game.     │
     └──────────────────────────────────────────────────────────────┘
     """
     out = list(palette)
@@ -596,7 +682,7 @@ def clut8_swizzle(palette: list) -> list:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  GS Texture Swizzle  —  Reorder pixel data for PS2 VRAM layout
+#  GS Texture Swizzle — reordering image data for PS2 VRAM
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _gs_swizzle_32bit(data: bytes, width: int, height: int) -> bytes:
@@ -610,19 +696,19 @@ def _gs_swizzle_32bit(data: bytes, width: int, height: int) -> bytes:
     │  • Block    = 8  × 8  pixels  =  256  bytes  (32 blocks/page)       │
     │  • Column   = 8  × 2  pixels  =  64   bytes  (4 columns/block)      │
     │                                                                      │
-    │  Block order within a page (32 blocks):                              │
+    │  Block order within the page (32 blocks):                           │
     │   0  1  4  5  16 17 20 21                                            │
     │   2  3  6  7  18 19 22 23                                            │
     │   8  9  12 13 24 25 28 29                                            │
     │  10 11  14 15 26 27 30 31                                            │
     │                                                                      │
-    │  Important note:                                                      │
-    │  This swizzle is only needed when uploading a texture directly        │
-    │  to VRAM. Many homebrew loaders apply swizzle themselves →           │
-    │  use --swizzle only if your loader expects pre-swizzled data.        │
+    │  Important note:                                                     │
+    │  This swizzle is only used when uploading a texture directly to     │
+    │  VRAM — many homebrew loaders do the swizzle themselves → only use  │
+    │  --swizzle if the project's loader expects pre-arranged data.       │
     └──────────────────────────────────────────────────────────────────────┘
     """
-    # ─── Block order within a page for PSMCT32 ──────────────────────────────
+    # ─── Block order within the page for PSMCT32 ─────────────────────────────
     BLOCK_ORDER_32 = [
          0,  1,  4,  5, 16, 17, 20, 21,
          2,  3,  6,  7, 18, 19, 22, 23,
@@ -630,39 +716,39 @@ def _gs_swizzle_32bit(data: bytes, width: int, height: int) -> bytes:
         10, 11, 14, 15, 26, 27, 30, 31,
     ]
 
-    PAGE_W  = 64    # Page width in pixels
-    PAGE_H  = 32    # Page height in pixels
-    BLOCK_W = 8     # Block width in pixels
-    BLOCK_H = 8     # Block height in pixels
-    BPP     = 4     # Bytes per pixel (32-bit)
+    PAGE_W  = 64    # page width in pixels
+    PAGE_H  = 32    # page height in pixels
+    BLOCK_W = 8     # block width in pixels
+    BLOCK_H = 8     # block height in pixels
+    BPP     = 4     # bytes per pixel (32-bit)
 
     src  = bytearray(data)
     dst  = bytearray(len(data))
 
     for y in range(height):
         for x in range(width):
-            # ─── Determine page coordinates ──────────────────────────────────
+            # ─── Determine the page ───────────────────────────────────────────
             page_x = x // PAGE_W
             page_y = y // PAGE_H
             pages_w = max(1, width // PAGE_W)
 
-            # ─── Position within the page ────────────────────────────────────
+            # ─── Position within the page ──────────────────────────────────
             px = x % PAGE_W
             py = y % PAGE_H
 
-            # ─── Determine block index within the page ───────────────────────
+            # ─── Determine the block within the page ───────────────────────
             bx = px // BLOCK_W
             by = py // BLOCK_H
-            block_idx = by * (PAGE_W // BLOCK_W) + bx   # Range: 0-31
+            block_idx = by * (PAGE_W // BLOCK_W) + bx   # 0-31
 
-            # ─── Actual block position in VRAM ───────────────────────────────
+            # ─── The block's actual position in VRAM ─────────────────────────
             actual_block = BLOCK_ORDER_32[block_idx % 32]
 
-            # ─── Pixel position within the block ────────────────────────────
+            # ─── Pixel position within the block ──────────────────────────────
             col_x = px % BLOCK_W
             col_y = py % BLOCK_H
 
-            # ─── Final destination index in VRAM ─────────────────────────────
+            # ─── Final position in VRAM ───────────────────────────────────────
             page_offset  = (page_y * pages_w + page_x) * (PAGE_W * PAGE_H)
             block_offset = actual_block * (BLOCK_W * BLOCK_H)
             pixel_offset = col_y * BLOCK_W + col_x
@@ -684,7 +770,7 @@ def _gs_swizzle_16bit(data: bytes, width: int, height: int) -> bytes:
     │  • Page  = 64 × 64 pixels  =  8192 bytes                            │
     │  • Block = 16 × 8 pixels   =  256  bytes  (64 blocks/page)          │
     │                                                                      │
-    │  Block order within a page (64 blocks):                              │
+    │  Block order (64 blocks):                                            │
     │   0  2  8  10  32 34 40 42                                           │
     │   1  3  9  11  33 35 41 43                                           │
     │   4  6  12 14  36 38 44 46                                           │
@@ -748,12 +834,12 @@ def _gs_swizzle_16bit(data: bytes, width: int, height: int) -> bytes:
 def apply_gs_swizzle(pixel_data: bytes, width: int, height: int,
                      img_type: int) -> bytes:
     """
-    Apply GS Texture Swizzle to pixel data based on image type.
+    Applies GS Texture Swizzle to the image data based on its type.
     ┌──────────────────────────────────────────────────────┐
     │  32-bit → _gs_swizzle_32bit                          │
     │  16-bit → _gs_swizzle_16bit                          │
-    │  8-bit  → no swizzle (applied by the loader instead)  │
-    │  4-bit  → no swizzle (applied by the loader instead)  │
+    │  8-bit  → no swizzle (usually applied in the loader) │
+    │  4-bit  → no swizzle (usually applied in the loader) │
     └──────────────────────────────────────────────────────┘
     """
     if img_type == IMG_RGBA32:
@@ -761,29 +847,30 @@ def apply_gs_swizzle(pixel_data: bytes, width: int, height: int,
     elif img_type == IMG_RGBA16:
         return _gs_swizzle_16bit(pixel_data, width, height)
     else:
-        return pixel_data   # 8-bit and 4-bit: no swizzle applied
+        return pixel_data   # 8-bit and 4-bit: unchanged
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Mipmaps  —  Generate multiple resolution levels
+#  Mipmaps — generating multiple detail levels
 # ══════════════════════════════════════════════════════════════════════════════
 
 def generate_mipmaps(img: Image.Image) -> list:
     """
-    Generate a complete mipmap chain from the original image.
+    Generates a complete mipmap chain from the source image.
     ┌──────────────────────────────────────────────────────────────────────┐
-    │  Mipmap = multiple resolution levels for a texture:                  │
-    │  Level 0: original image     (256×256)                               │
-    │  Level 1: half size          (128×128)                               │
-    │  Level 2: quarter size       (64×64)                                 │
-    │  ...down to 1×1                                                      │
+    │  Mipmap = multiple detail levels for a texture:                     │
+    │  Level 0: the original image  (256×256)                             │
+    │  Level 1: half size           (128×128)                             │
+    │  Level 2: quarter size        (64×64)                                │
+    │  ...down to 1×1                                                     │
     │                                                                      │
-    │  Why does it matter?                                                  │
-    │  PS2 GS selects the appropriate level based on distance from camera  │
-    │  Without mipmaps: distant textures appear distorted or shimmering    │
-    │  With mipmaps: smooth transition between resolution levels           │
+    │  Why does it matter?                                                 │
+    │  The PS2 GS picks the appropriate detail level based on the         │
+    │  texture's distance from the camera                                  │
+    │  Without mipmaps: distant textures appear distorted or shimmering   │
+    │  With mipmaps: a smooth transition between detail levels             │
     │                                                                      │
-    │  Uses LANCZOS resampling for highest quality downscaling.            │
+    │  Uses LANCZOS for the highest quality when downscaling.              │
     └──────────────────────────────────────────────────────────────────────┘
     """
     levels = [img]
@@ -799,7 +886,7 @@ def generate_mipmaps(img: Image.Image) -> list:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Build Picture Block
+#  Building the Picture Block
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_picture_block(pixel_data: bytes, clut_data: bytes,
@@ -810,7 +897,7 @@ def build_picture_block(pixel_data: bytes, clut_data: bytes,
                         use_swizzle: bool = False,
                         mip_levels: list = None) -> bytes:
     """
-    Build a TIM2 Picture Block (Header + data + padding).
+    Builds a TIM2 Picture Block (Header + data + padding).
     ┌──────────────────────────────────────────────────────────────┐
     │  TIM2 Picture Block Header  =  48 bytes                      │
     │  ──────────────────────────────────────────────────────────  │
@@ -820,13 +907,13 @@ def build_picture_block(pixel_data: bytes, clut_data: bytes,
     │   8       4B   Image Data Size                               │
     │  12       2B   Header Size  =  48                            │
     │  14       2B   CLUT Colors Count                             │
-    │  16       1B   Mipmap Count  (1 or more if mipmaps enabled)  │
+    │  16       1B   Mipmap Count  =  1                            │
     │  17       1B   CLUT Type                                     │
     │  18       1B   Image Type                                    │
     │  19       1B   reserved  =  0                                │
     │  20       2B   Width                                         │
     │  22       2B   Height                                        │
-    │  24       8B   GsTex0  (fully computed)                      │
+    │  24       8B   GsTex0  (computed with full accuracy)         │
     │  32       8B   GsTex1  =  0  (nearest filtering)            │
     │  40       4B   GsTexClut                                     │
     │  44       4B   reserved  =  0                                │
@@ -834,11 +921,11 @@ def build_picture_block(pixel_data: bytes, clut_data: bytes,
     │  Then:  [ pixel_data ]  [ clut_data ]  [ padding ]           │
     └──────────────────────────────────────────────────────────────┘
     """
-    # ─── Apply GS Swizzle if requested ──────────────────────────────────────
+    # ─── Apply GS Swizzle if requested ────────────────────────────────────────
     if use_swizzle:
         pixel_data = apply_gs_swizzle(pixel_data, width, height, img_type)
 
-    # ─── Merge base level data with mipmap levels ───────────────────────────
+    # ─── Merge the base level data with the mipmap levels ────────────────────
     mip_data      = b''
     mipmap_count  = 1
     if mip_levels:
@@ -862,24 +949,24 @@ def build_picture_block(pixel_data: bytes, clut_data: bytes,
     hdr[16] = mipmap_count
     hdr[17] = clut_type
     hdr[18] = img_type
-    hdr[19] = 0            # reserved (must be 0)
+    hdr[19] = 0            # reserved
     struct.pack_into('<H', hdr, 20, width)
     struct.pack_into('<H', hdr, 22, height)
     struct.pack_into('<Q', hdr, 24, gs_tex0)
-    struct.pack_into('<Q', hdr, 32, 0)           # GsTex1 = 0 (nearest filtering)
+    struct.pack_into('<Q', hdr, 32, 0)           # GsTex1 = nearest filter
     struct.pack_into('<I', hdr, 40, gs_texclut)
-    struct.pack_into('<I', hdr, 44, 0)           # reserved (must be 0)
+    struct.pack_into('<I', hdr, 44, 0)           # reserved
 
     return bytes(hdr) + pixel_data + mip_data + clut_data + (b'\x00' * padding)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Build the complete TIM2 file
+#  Building the complete TIM2 file
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_tim2_file(blocks: list) -> bytes:
     """
-    Build a complete TIM2 file from a list of Picture Blocks.
+    Builds a complete TIM2 file from a list of Picture Blocks.
     ┌──────────────────────────────────────────┐
     │  TIM2 File Header  =  16 bytes           │
     │  ──────────────────────────────────────  │
@@ -896,21 +983,22 @@ def build_tim2_file(blocks: list) -> bytes:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Four Format Converters
+#  The four format converters
 # ══════════════════════════════════════════════════════════════════════════════
 
 def convert_32bit(img: Image.Image, premult: bool = True,
                   use_swizzle: bool = False, use_mipmaps: bool = False,
                   **_) -> bytes:
     """
-    32-bit RGBA8888  —  highest quality, full 8-bit alpha.
+    32-bit RGBA8888  —  highest quality, full 8-bit transparency.
     ┌──────────────────────────────────────────────────────────┐
     │  Best for:  3D textures, menu backgrounds,               │
-    │             anything requiring perfect quality and alpha.  │
+    │             anything needing pristine quality and         │
+    │             precise transparency.                         │
     │                                                          │
     │  Alpha is converted from 0-255 → 0-0x80  (PS2 range).   │
-    │  --swizzle   : apply GS VRAM swizzle to pixel data.      │
-    │  --mipmaps   : generate full mipmap chain.               │
+    │  --swizzle   : applies GS VRAM swizzle to the data.      │
+    │  --mipmaps   : generates a full mipmap chain.            │
     └──────────────────────────────────────────────────────────┘
     """
     if premult:
@@ -926,10 +1014,10 @@ def convert_32bit(img: Image.Image, premult: bool = True,
         data[i+2] = raw[i+2]
         data[i+3] = ps2_alpha(raw[i+3])
 
-    # ─── Generate Mipmap levels ──────────────────────────────────────────────
+    # ─── Generate mipmap levels ──────────────────────────────────────────────
     mip_levels = None
     if use_mipmaps:
-        mip_imgs = generate_mipmaps(img)[1:]   # Level 0 is the base image (already included)
+        mip_imgs = generate_mipmaps(img)[1:]   # level 0 is the original (already included)
         mip_levels = []
         for mip in mip_imgs:
             mip_rgba = mip.convert('RGBA')
@@ -950,42 +1038,50 @@ def convert_32bit(img: Image.Image, premult: bool = True,
 
 
 def convert_16bit(img: Image.Image, premult: bool = True,
+                  use_dither: bool = False,
                   use_swizzle: bool = False, use_mipmaps: bool = False,
                   **_) -> bytes:
     """
     16-bit RGBA5551  —  high quality, half the size of 32-bit.
     ┌──────────────────────────────────────────────────────────┐
-    │  Alpha: single bit only  (fully opaque or fully transparent).  │
-    │  Best for:  textures without partial transparency, backgrounds. │
-    │  --swizzle : apply GS VRAM swizzle to pixel data.        │
-    │  --mipmaps : generate full mipmap chain.                 │
+    │  Alpha: a single bit only  (fully opaque or fully        │
+    │  transparent).                                            │
+    │  Best for:  textures without partial transparency,       │
+    │             backgrounds.                                  │
+    │  --dither  : Floyd-Steinberg on the channels to avoid the │
+    │              visible color banding produced when          │
+    │              truncating to 5-bit.                          │
+    │  --swizzle : applies GS VRAM swizzle to the data.         │
+    │  --mipmaps : generates a full mipmap chain.               │
     └──────────────────────────────────────────────────────────┘
     """
     if premult:
         img = premultiply_alpha(img)
     img = img.convert('RGBA')
     w, h = img.size
-    raw  = img.tobytes()
 
-    data = bytearray()
-    for i in range(0, len(raw), 4):
-        val = rgba_to_16bit(raw[i], raw[i+1], raw[i+2], raw[i+3])
-        data += struct.pack('<H', val)
+    def _pack(rgba_img: Image.Image) -> bytes:
+        out = bytearray()
+        if use_dither:
+            dimg = dither_16bit_channels(rgba_img)
+            draw = dimg.tobytes()
+            for i in range(0, len(draw), 4):
+                val = pack_ps2_5551(draw[i], draw[i + 1], draw[i + 2], draw[i + 3])
+                out += struct.pack('<H', val)
+        else:
+            raw = rgba_img.tobytes()
+            for i in range(0, len(raw), 4):
+                val = rgba_to_16bit(raw[i], raw[i + 1], raw[i + 2], raw[i + 3])
+                out += struct.pack('<H', val)
+        return bytes(out)
 
-    # ─── Generate Mipmap levels ──────────────────────────────────────────────
+    data = bytearray(_pack(img))
+
+    # ─── Generate mipmap levels ──────────────────────────────────────────────
     mip_levels = None
     if use_mipmaps:
         mip_imgs = generate_mipmaps(img)[1:]
-        mip_levels = []
-        for mip in mip_imgs:
-            mip_rgba = mip.convert('RGBA')
-            mip_raw  = mip_rgba.tobytes()
-            mip_data = bytearray()
-            for i in range(0, len(mip_raw), 4):
-                val = rgba_to_16bit(mip_raw[i], mip_raw[i+1],
-                                    mip_raw[i+2], mip_raw[i+3])
-                mip_data += struct.pack('<H', val)
-            mip_levels.append(bytes(mip_data))
+        mip_levels = [_pack(mip.convert('RGBA')) for mip in mip_imgs]
 
     return build_picture_block(
         bytes(data), b'', w, h,
@@ -998,14 +1094,16 @@ def convert_8bit(img: Image.Image, premult: bool = False,
                  use_dither: bool = False, use_mipmaps: bool = False,
                  **_) -> bytes:
     """
-    8-bit Indexed  —  256 colors with CLUT.
+    8-bit Indexed  —  256 colors with a CLUT.
     ┌──────────────────────────────────────────────────────────┐
-    │  Best for:  characters, environments, any limited-color texture. │
+    │  Best for:  characters, environments, any texture with   │
+    │             a limited color range.                        │
     │                                                          │
-    │  • MEDIANCUT for optimal 256-color selection             │
-    │  • Alpha extracted from original image (averaged per color) │
-    │  • Mandatory CLUT Swizzle for PS2 (CSM1)                │
-    │  • --mipmaps : generate full mipmap chain (indexed)     │
+    │  • MEDIANCUT to pick the best 256 colors                 │
+    │  • Alpha extracted from the source image (average per    │
+    │    color)                                                  │
+    │  • CLUT Swizzle mandatory for PS2 (CSM1)                 │
+    │  • --mipmaps : generates a full mipmap chain (indexed)   │
     └──────────────────────────────────────────────────────────┘
     """
     img_rgba = img.convert('RGBA')
@@ -1015,7 +1113,7 @@ def convert_8bit(img: Image.Image, premult: bool = False,
     palette   = img_q.getpalette()
     avg_alpha = extract_alpha_per_index(img_rgba, img_q, 256)
 
-    # ─── Build CLUT then apply Swizzle ──────────────────────────────────────
+    # ─── Build the CLUT then apply Swizzle ────────────────────────────────────
     clut_raw = [(palette[i*3], palette[i*3+1], palette[i*3+2], avg_alpha[i])
                 for i in range(256)]
     clut_raw  = clut8_swizzle(clut_raw)
@@ -1024,9 +1122,9 @@ def convert_8bit(img: Image.Image, premult: bool = False,
     for r, g, b, a in clut_raw:
         clut_data += bytes([r, g, b, ps2_alpha(a)])
 
-    # ─── Generate Mipmap levels for 8-bit ───────────────────────────────────
-    # Downscale the original RGBA image then re-quantize each mipmap level
-    # using the same palette approach to maintain color consistency
+    # ─── Generate mipmap levels for 8-bit ─────────────────────────────────────
+    # We downscale the original RGBA image, then re-quantize each level
+    # using the same original CLUT to preserve color consistency
     mip_levels = None
     if use_mipmaps:
         mip_imgs   = generate_mipmaps(img_rgba)[1:]
@@ -1048,11 +1146,11 @@ def convert_4bit(img: Image.Image, premult: bool = False,
     """
     4-bit Indexed  —  16 colors, smallest size.
     ┌──────────────────────────────────────────────────────────┐
-    │  Best for:  icons, simple interfaces, UI elements.      │
+    │  Best for:  icons, simple UI, interface elements.        │
     │                                                          │
     │  Nibble packing:  lo nibble = pixel[i]                  │
     │                   hi nibble = pixel[i+1]                │
-    │  --mipmaps : generate full mipmap chain (indexed 4-bit) │
+    │  --mipmaps : generates a full mipmap chain (indexed 4-bit) │
     └──────────────────────────────────────────────────────────┘
     """
     img_rgba = img.convert('RGBA')
@@ -1062,7 +1160,7 @@ def convert_4bit(img: Image.Image, premult: bool = False,
     palette   = img_q.getpalette()
     avg_alpha = extract_alpha_per_index(img_rgba, img_q, 16)
 
-    # ─── Build CLUT (16 colors, no Swizzle needed for 4-bit) ────────────────
+    # ─── Build the CLUT (16 colors, no Swizzle needed) ────────────────────────
     clut_data = bytearray()
     for i in range(16):
         r = palette[i*3]
@@ -1071,7 +1169,7 @@ def convert_4bit(img: Image.Image, premult: bool = False,
         clut_data += bytes([r, g, b, ps2_alpha(avg_alpha[i])])
 
     def _pack_nibbles(img_indexed: Image.Image) -> bytes:
-        """Nibble packing: two pixels packed into one byte."""
+        """Nibble packing: two pixels per byte."""
         idxs = list(img_indexed.getdata())
         out  = bytearray()
         for i in range(0, len(idxs), 2):
@@ -1082,7 +1180,7 @@ def convert_4bit(img: Image.Image, premult: bool = False,
 
     pixel_data = _pack_nibbles(img_q)
 
-    # ─── Generate Mipmap levels for 4-bit ───────────────────────────────────
+    # ─── Generate mipmap levels for 4-bit ─────────────────────────────────────
     mip_levels = None
     if use_mipmaps:
         mip_imgs   = generate_mipmaps(img_rgba)[1:]
@@ -1426,6 +1524,7 @@ def convert_24bit(img: Image.Image, premult: bool = False,
     w, h = img.size
     raw  = img.tobytes()
 
+    # ─── Generate Mipmap levels ───────────────────────────────────────────────
     mip_levels = None
     if use_mipmaps:
         mip_imgs   = generate_mipmaps(img)[1:]
@@ -1448,34 +1547,34 @@ FORMATS = {
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Command-Line Interface
+#  Command-line interface — all user-facing text in English
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  --verify  —  Validate the integrity of a TIM2 file
+#  --verify  —  checking the validity of a TIM2 file
 # ══════════════════════════════════════════════════════════════════════════════
 
 def verify_tm2(path: Path) -> bool:
     """
-    Verify the integrity of a TIM2 file and display a detailed report.
+    Verifies the validity of a TIM2 file and prints a detailed report.
     ┌──────────────────────────────────────────────────────────────────────┐
-    │  Checks performed:                                                    │
-    │  1. Magic Number  "TIM2"  (first 4 bytes)                            │
+    │  Checks:                                                             │
+    │  1. Magic Number  "TIM2"  (first 4 bytes)                           │
     │  2. Version  =  0x04                                                 │
-    │  3. Total file size ≥ File Header + Picture Block Header             │
-    │  4. Image Data size in header matches actual data                     │
-    │  5. CLUT size in header matches actual data                           │
+    │  3. Total file size ≥ File Header + Picture Block Header            │
+    │  4. Image Data size in the header = actual data                     │
+    │  5. CLUT size in the header = actual data                           │
     │  6. Header Size = 48                                                 │
     │  7. Image Type is a known value (0x00 / 0x01 / 0x05 / 0x06)        │
-    │  8. Dimensions > 0                                                    │
-    │  9. Alignment: Block Size is a multiple of 128                        │
-    │  10. GsTex0: TW and TH are consistent with the dimensions            │
-    │  11. CLUT colors: correct count for the Image Type                   │
-    │  12. File is not truncated (no missing data)                          │
+    │  8. Dimensions > 0                                                   │
+    │  9. Alignment: Block Size is a multiple of 128                      │
+    │  10. GsTex0: TW and TH are consistent with the dimensions           │
+    │  11. CLUT colors: correct according to the Image Type               │
+    │  12. File is not truncated (no missing data)                        │
     └──────────────────────────────────────────────────────────────────────┘
-    Returns True if the file is valid, False if any check fails.
+    Returns True if the file is valid, False if a problem is found.
     """
     sep  = '─' * 52
     ok   = True
@@ -1499,7 +1598,7 @@ def verify_tm2(path: Path) -> bool:
     print(f"  Verifying: {path.name}")
     print(sep)
 
-    # ─── Read the file ────────────────────────────────────────────────────────
+    # ─── Read the file ──────────────────────────────────────────────────────────
     if not path.exists():
         print(f"  [FAIL]  File not found: {path}")
         print(sep)
@@ -1531,7 +1630,7 @@ def verify_tm2(path: Path) -> bool:
         f"Version OK  (0x{version:02X})",
         f"Unexpected Version  (0x{version:02X}, expected 0x04)", is_warn=True)
 
-    # ─── Read Picture Block Header (offset 16) ───────────────────────────────
+    # ─── Read the Picture Block Header (offset 16) ───────────────────────────
     off         = 16
     block_total = struct.unpack_from('<I', data, off +  0)[0]
     clut_size   = struct.unpack_from('<I', data, off +  4)[0]
@@ -1557,7 +1656,7 @@ def verify_tm2(path: Path) -> bool:
         f"Image Type OK  ({type_name})",
         f"Unknown Image Type  (0x{img_type:02X})")
 
-    # ─── 6. Dimensions > 0 ───────────────────────────────────────────────────
+    # ─── 6. Dimensions > 0 ──────────────────────────────────────────────────────
     chk(width > 0 and height > 0,
         f"Dimensions OK  ({width}x{height})",
         f"Invalid Dimensions  ({width}x{height})")
@@ -1570,25 +1669,25 @@ def verify_tm2(path: Path) -> bool:
         f"Non-power-of-2 dimensions  ({width}x{height})  — may cause rendering issues",
         is_warn=True)
 
-    # ─── 8. File size vs Block Total ────────────────────────────────────────
+    # ─── 8. File size vs Block Total ─────────────────────────────────────
     expected_file_size = 16 + block_total
     chk(file_size >= expected_file_size,
         f"File completeness OK  (expected {expected_file_size} bytes, got {file_size})",
         f"File appears truncated  (expected {expected_file_size} bytes, got {file_size})")
 
-    # ─── 9. Block size alignment to 128 bytes ───────────────────────────────
+    # ─── 9. Block Size aligned to 128 ────────────────────────────────────────
     chk(block_total % 128 == 0,
         f"Block alignment OK  ({block_total} bytes, aligned to 128)",
         f"Block size not aligned to 128  ({block_total} bytes)")
 
-    # ─── 10. Consistency: Image Data + CLUT + Header = Block Total ────────────
+    # ─── 10. Image Data + CLUT + Header size = Block Total ────────────────────
     computed = hdr_size + img_size + clut_size
     expected_aligned = align_up(computed, 128)
     chk(block_total == expected_aligned,
         f"Block size consistent  (header+img+clut={computed}, aligned={block_total})",
         f"Block size mismatch  (computed {expected_aligned}, stored {block_total})")
 
-    # ─── 11. CLUT colors match Image Type ───────────────────────────────────
+    # ─── 11. CLUT colors according to Image Type ─────────────────────────────
     expected_clut = {
         IMG_RGBA32:   0,
         IMG_RGBA16:   0,
@@ -1601,7 +1700,7 @@ def verify_tm2(path: Path) -> bool:
             f"CLUT colors OK  ({clut_colors})",
             f"CLUT colors mismatch  (got {clut_colors}, expected {exp_colors} for {type_name})")
 
-    # ─── 12. GsTex0: TW and TH are consistent with dimensions ──────────────
+    # ─── 12. GsTex0: TW and TH are consistent ────────────────────────────────
     tw = (gs_tex0 >> 26) & 0xF
     th = (gs_tex0 >> 30) & 0xF
     expected_tw = max(0, math.ceil(math.log2(max(width,  1))))
@@ -1611,7 +1710,7 @@ def verify_tm2(path: Path) -> bool:
         f"GsTex0 TW/TH mismatch  (stored TW={tw}/TH={th}, expected TW={expected_tw}/TH={expected_th})",
         is_warn=True)
 
-    # ─── Final result ────────────────────────────────────────────────────────
+    # ─── Final result ─────────────────────────────────────────────────────
     print(sep)
     if ok and not warns:
         print(f"  Result: VALID  —  all checks passed.")
@@ -1624,28 +1723,29 @@ def verify_tm2(path: Path) -> bool:
     return ok
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  --extract  —  Reverse conversion: TIM2 → any image format
+#  --extract  —  reverse conversion: TIM2 → any image format
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Supported output formats  (convert FROM TIM2)
+#  Supported output formats for extraction (converting from TIM2)
 # ══════════════════════════════════════════════════════════════════════════════
 #
 #  Total: 9 formats
 #  ┌─────────────────────────────────────────────────────────────────────┐
-#  │  .png   — Best choice: preserves Alpha fully with no quality loss  │
-#  │  .jpg   — No Alpha (white background), quality 95, 4:4:4 sampling │
-#  │  .jpeg  — Same as JPG (alternate extension)                        │
-#  │  .bmp   — No Alpha (white background), uncompressed                │
-#  │  .tga   — Supports Alpha, common in PS2 game tools                 │
-#  │  .tiff  — Supports Alpha, lossless high quality                    │
-#  │  .tif   — Same as TIFF (alternate extension)                       │
-#  │  .webp  — Supports Alpha, modern compression, small size           │
-#  │  .ppm   — No Alpha (white background), uncompressed                │
+#  │  .png   — best choice: preserves Alpha fully with no quality loss  │
+#  │  .jpg   — no Alpha (white background), quality 95, 4:4:4 subsampling │
+#  │  .jpeg  — same as JPG (alternate extension)                        │
+#  │  .bmp   — no Alpha (white background), uncompressed                │
+#  │  .tga   — supports Alpha, common in PS2 game tools                 │
+#  │  .tiff  — supports Alpha, high quality with no loss                │
+#  │  .tif   — same as TIFF (alternate extension)                       │
+#  │  .webp  — supports Alpha, modern compression and small size        │
+#  │  .ppm   — no Alpha (white background), uncompressed                │
 #  └─────────────────────────────────────────────────────────────────────┘
 #
-#  Note: Formats without Alpha (jpg, bmp, ppm) are composited onto a white
-#        background to best preserve the appearance of transparency.
+#  Note: formats without Alpha (jpg, bmp, ppm) are composited onto a
+#        white background to preserve the look of transparency as much
+#        as possible.
 EXTRACT_EXTENSIONS = {
     '.png', '.jpg', '.jpeg', '.bmp', '.tga',
     '.tiff', '.tif', '.webp', '.ppm',
@@ -1654,9 +1754,10 @@ EXTRACT_EXTENSIONS = {
 
 def _ps2_alpha_to_255(a: int) -> int:
     """
-    Reverse Alpha conversion from PS2 range (0-0x80) to standard (0-255).
+    Reverses the Alpha conversion from the PS2 range (0-0x80) to the
+    standard range (0-255).
     ┌──────────────────────────────────────────────────────┐
-    │  0x80 (128) in PS2  =  255 in standard range         │
+    │  0x80 (128) in PS2  =  255 in the standard range     │
     │  Formula:  min(round(a × 255 / 128), 255)            │
     └──────────────────────────────────────────────────────┘
     """
@@ -1665,11 +1766,12 @@ def _ps2_alpha_to_255(a: int) -> int:
 
 def _16bit_to_rgba(val: int):
     """
-    Convert RGBA5551 (16-bit PS2) → RGBA8888.
+    Converts RGBA5551 (PS2 16-bit) → RGBA8888.
     ┌─────────────────────────────────────────────────────────────┐
-    │  Uses bit expansion: R5 → R8 by multiplying by 255/31       │
-    │  More accurate than simple shift (r << 3) because it maps   │
-    │  full values correctly, e.g. 0x1F → 255 instead of 248     │
+    │  We use bit expansion: R5 → R8 by multiplying by 255/31    │
+    │  for accuracy. This is more precise than a simple shift     │
+    │  (r << 3) because it correctly restores full values like    │
+    │  0x1F → 255 instead of 248                                  │
     └─────────────────────────────────────────────────────────────┘
     """
     r5 = (val >>  0) & 0x1F
@@ -1685,21 +1787,22 @@ def _16bit_to_rgba(val: int):
 
 def _unswizzle_clut8(palette: list) -> list:
     """
-    Reverse the 8-bit CLUT Swizzle (CSM1).
+    Reverses the 8-bit CLUT Swizzle (CSM1).
     ┌──────────────────────────────────────────────────────────────┐
-    │  Colors in the file are stored in PS2 swizzled order        │
-    │  We restore the original order by reversing clut8_swizzle   │
-    │  PS2 order:  0,2,1,3  →  original: 0,1,2,3                  │
+    │  When reading from the file, the colors are arranged in the  │
+    │  PS2 order (swizzled) — we restore the original order by     │
+    │  reversing the clut8_swizzle operation                       │
+    │  PS2 order:    0,2,1,3  →  original: 0,1,2,3                │
     └──────────────────────────────────────────────────────────────┘
     """
-    # Build inverse mapping: for each PS2 position → original position
+    # We build a reverse table: for each PS2 position → the original position
     out = list(palette)
     for i in range(256):
         block      = i // 32
         inner      = i % 32
         stripe     = inner // 8
         pos        = inner % 8
-        new_stripe = [0, 2, 1, 3][stripe]   # same swizzle table — the operation is self-inverse
+        new_stripe = [0, 2, 1, 3][stripe]   # same swizzle — the operation is symmetric
         j = block * 32 + new_stripe * 8 + pos
         out[i] = palette[j]
     return out
@@ -1707,27 +1810,27 @@ def _unswizzle_clut8(palette: list) -> list:
 
 def extract_tm2(src_path: Path, out_ext: str) -> str:
     """
-    Extract an image from a TIM2 file with high accuracy.
+    Extracts an image from a TIM2 file with high accuracy.
     ┌──────────────────────────────────────────────────────────────────────┐
-    │  Logic per image type:                                                │
+    │  Logic based on image type:                                          │
     │                                                                      │
     │  32-bit RGBA8888:                                                    │
-    │    • Read R,G,B,A directly                                            │
-    │    • Reverse ps2_alpha: A = round(A_ps2 × 255 / 128)               │
-    │    • No data loss                                                     │
+    │    • read R,G,B,A directly                                          │
+    │    • reverse ps2_alpha: A = round(A_ps2 × 255 / 128)                │
+    │    • no data loss                                                    │
     │                                                                      │
     │  16-bit RGBA5551:                                                    │
-    │    • bit expansion for accuracy: R5→R8 by multiplying by 255/31    │
-    │    • Alpha: 1-bit only (0 or 255)                                    │
+    │    • bit expansion for accuracy: R5→R8 by multiplying by 255/31     │
+    │    • Alpha: 1-bit only (0 or 255)                                   │
     │                                                                      │
     │  8-bit Indexed:                                                      │
-    │    • Reverse CLUT Swizzle first                                       │
-    │    • Build full palette with Alpha                                    │
-    │    • Draw image from indices                                          │
+    │    • reverse the CLUT Swizzle first                                 │
+    │    • build the full palette with Alpha                              │
+    │    • draw the image from the indices                                 │
     │                                                                      │
     │  4-bit Indexed:                                                      │
-    │    • Unpack nibbles: lo nibble = pixel[i], hi = pixel[i+1]         │
-    │    • Build 16-color palette with Alpha                               │
+    │    • decode Nibble packing: lo nibble = pixel[i], hi = pixel[i+1]  │
+    │    • build a 16-color palette with Alpha                            │
     └──────────────────────────────────────────────────────────────────────┘
     """
     if not src_path.exists():
@@ -1735,12 +1838,12 @@ def extract_tm2(src_path: Path, out_ext: str) -> str:
 
     data = src_path.read_bytes()
 
-    # ─── Validate Magic Number ───────────────────────────────────────────────
+    # ─── Check the Magic Number ────────────────────────────────────────────────
     if data[:4] != b'TIM2':
         raise ValueError(f"Not a valid TIM2 file: {src_path.name}")
 
-    # ─── Read Picture Block Header ───────────────────────────────────────────
-    off         = 16   # Offset after File Header
+    # ─── Read the Picture Block Header ──────────────────────────────────────
+    off         = 16   # after the File Header
     clut_size   = struct.unpack_from('<I', data, off +  4)[0]
     img_size    = struct.unpack_from('<I', data, off +  8)[0]
     hdr_size    = struct.unpack_from('<H', data, off + 12)[0]
@@ -1750,7 +1853,7 @@ def extract_tm2(src_path: Path, out_ext: str) -> str:
     width       = struct.unpack_from('<H', data, off + 20)[0]
     height      = struct.unpack_from('<H', data, off + 22)[0]
 
-    # ─── Extract image data and CLUT ─────────────────────────────────────────
+    # ─── Extract the image and CLUT data ─────────────────────────────────────
     img_start  = off + hdr_size
     img_end    = img_start + img_size
     clut_start = img_end
@@ -1759,7 +1862,7 @@ def extract_tm2(src_path: Path, out_ext: str) -> str:
     img_data  = data[img_start:img_end]
     clut_data = data[clut_start:clut_end]
 
-    # ─── Build image based on type ───────────────────────────────────────────
+    # ─── Build the image based on type ───────────────────────────────────────
 
     if img_type == IMG_RGBA32:
         # ── 32-bit RGBA8888 ───────────────────────────────────────────────────
@@ -1796,7 +1899,7 @@ def extract_tm2(src_path: Path, out_ext: str) -> str:
 
     elif img_type == IMG_INDEXED8:
         # ── 8-bit Indexed ─────────────────────────────────────────────────────
-        # ─── Read CLUT (RGBA32 × 256 colors) ──────────────────────────────
+        # Read the CLUT (RGBA32 × 256 colors)
         raw_clut = []
         for i in range(0, clut_colors * 4, 4):
             r = clut_data[i]
@@ -1805,17 +1908,17 @@ def extract_tm2(src_path: Path, out_ext: str) -> str:
             a = _ps2_alpha_to_255(clut_data[i+3])
             raw_clut.append((r, g, b, a))
 
-        # ─── Reverse Swizzle ─────────────────────────────────────────────────
+        # ─── Reverse the Swizzle ─────────────────────────────────────────────
         palette = _unswizzle_clut8(raw_clut)
 
-        # ─── Build image from indices ────────────────────────────────────────
+        # ─── Build the image from the indices ──────────────────────────────
         pixels = [palette[idx] for idx in img_data[:width * height]]
         img = Image.new('RGBA', (width, height))
         img.putdata(pixels)
 
     elif img_type == IMG_INDEXED4:
         # ── 4-bit Indexed ─────────────────────────────────────────────────────
-        # Read CLUT (RGBA32 × 16 colors)
+        # Read the CLUT (RGBA32 × 16 colors)
         palette = []
         for i in range(0, clut_colors * 4, 4):
             r = clut_data[i]
@@ -1824,7 +1927,7 @@ def extract_tm2(src_path: Path, out_ext: str) -> str:
             a = _ps2_alpha_to_255(clut_data[i+3])
             palette.append((r, g, b, a))
 
-        # ─── Unpack nibbles ──────────────────────────────────────────────────
+        # ─── Decode Nibble packing ────────────────────────────────────────────
         indices = []
         for byte in img_data:
             indices.append(byte & 0x0F)         # lo nibble = first pixel
@@ -1837,22 +1940,22 @@ def extract_tm2(src_path: Path, out_ext: str) -> str:
     else:
         raise ValueError(f"Unsupported image type in TIM2: 0x{img_type:02X}")
 
-    # ─── Save the image in the requested format ─────────────────────────────
+    # ─── Save the image in the requested format ─────────────────────────────────
     dst_path = src_path.with_suffix(out_ext)
 
-    # ─── Convert to RGB if the format does not support Alpha ────────────────
+    # ─── Convert to RGB if the format doesn't support Alpha ──────────────────
     no_alpha_fmts = {'.jpg', '.jpeg', '.bmp', '.ppm'}
     if out_ext.lower() in no_alpha_fmts:
-        # ─── Paste onto white background to preserve transparency appearance ─
+        # Paste onto a white background to preserve the look of transparency
         bg = Image.new('RGB', img.size, (255, 255, 255))
         bg.paste(img, mask=img.split()[3])
         img = bg
 
-    # ─── High quality settings for JPEG ─────────────────────────────────────
+    # ─── High quality for JPEG ───────────────────────────────────────────────
     save_kwargs = {}
     if out_ext.lower() in {'.jpg', '.jpeg'}:
         save_kwargs['quality'] = 95
-        save_kwargs['subsampling'] = 0   # 4:4:4 chroma subsampling for best quality
+        save_kwargs['subsampling'] = 0   # 4:4:4 for highest quality
 
     img.save(dst_path, **save_kwargs)
     return str(dst_path)
@@ -1922,7 +2025,7 @@ def convert_one(src: str, fmt: str, dst: str = None,
     if dst:
         dst_path = Path(dst)
     elif output_dir:
-        # ─── Output to specified directory keeping the original filename ──────
+        # ─── Output to a specific folder with the same filename ─────────────
         dst_path = output_dir / src_path.with_suffix('.tm2').name
     else:
         dst_path = src_path.with_suffix('.tm2')
@@ -1937,7 +2040,7 @@ def convert_one(src: str, fmt: str, dst: str = None,
     img  = open_any_image(src_path)
     w, h = img.size
 
-    # ─── Dimension warning — always shown, conversion continues regardless ───
+    # ─── Warn about irregular dimensions — always shown, conversion continues ───
     if not (is_power_of_2(w) and is_power_of_2(h)):
         print()
         check_and_warn_dimensions(src_path.name, w, h)
@@ -2016,20 +2119,28 @@ Examples:
     # ─── Mode --diff: compare original vs modified ───────────────────────────
     if args.diff or args.diff_list:
         pairs = []
+
+        # ── Source 1: --diff-list text file ──────────────────────────────────
         if args.diff_list:
             try:
                 pairs += read_diff_list(Path(args.diff_list))
             except Exception as e:
                 print(f'ERROR reading diff list: {e}')
                 sys.exit(1)
+
+        # ── Source 2: --original + --modified (files or folder) ──────────────
         if args.original and args.modified:
             orig_list = args.original
             mod_list  = args.modified
+
+            # Case A: single folder vs single folder
             if (len(orig_list) == 1 and len(mod_list) == 1
                     and Path(orig_list[0]).is_dir()
                     and Path(mod_list[0]).is_dir()):
                 diff_folders(Path(orig_list[0]), Path(mod_list[0]))
                 return
+
+            # Case B: multiple files paired by position
             if len(orig_list) != len(mod_list):
                 print(f'ERROR: --original has {len(orig_list)} file(s) but '
                       f'--modified has {len(mod_list)} file(s). Counts must match.')
@@ -2041,14 +2152,19 @@ Examples:
         elif args.original or args.modified:
             print('ERROR: --diff requires both --original and --modified')
             sys.exit(1)
+
         if not pairs:
             print('ERROR: no files to compare. '
                   'Use --original / --modified or --diff-list.')
             sys.exit(1)
+
+        # ── Run comparisons ───────────────────────────────────────────────────
         results = []
         for orig_p, mod_p in pairs:
             r = diff_files(orig_p, mod_p, show_header=True)
             results.append(r)
+
+        # ── Summary (only when more than one pair) ────────────────────────────
         if len(results) > 1:
             sep2 = '═' * 56
             safe   = sum(1 for r in results if r['compatible'] == 'SAFE')
@@ -2099,7 +2215,7 @@ Examples:
                 print(f'  {o}')
         return
 
-    # ─── Mode --verify: validate TIM2 file integrity ────────────────────────
+    # ─── Mode --verify: verify the validity of a TIM2 file ──────────────────────────────
     if args.verify:
         if not args.images:
             print('ERROR: provide one or more .tm2 files with --verify')
@@ -2117,7 +2233,7 @@ Examples:
             sys.exit(1)
         return
 
-    # ─── Mode --info: display TIM2 file information ─────────────────────────
+    # ─── Mode --info: display info about a TIM2 file ───────────────────────────────────
     if args.info:
         if not args.images:
             print('ERROR: provide a .tm2 file with --info')
@@ -2129,7 +2245,7 @@ Examples:
                 print(f'  FAILED: {src}  ({e})')
         return
 
-    # ─── Mode --list: read filenames from a text file ───────────────────────
+    # ─── Mode --list: read filenames from a text file ─────────────────────────
     if args.list:
         list_path = Path(args.list)
         try:
