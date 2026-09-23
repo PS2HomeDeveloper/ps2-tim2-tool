@@ -1,15 +1,16 @@
 name: Build Executables
 
+
 on:
   workflow_dispatch:
+
 
 permissions:
   contents: write
 
-env:
-  SRC_PATH: src/ps1_tim_tool.c
-
 jobs:
+
+
 
   cleanup:
     runs-on: ubuntu-latest
@@ -28,6 +29,8 @@ jobs:
             done
           fi
 
+
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -42,278 +45,61 @@ jobs:
 
 
 
-  # ─────────────────────────────────────────────
-  # Windows (x86_64 / x86 / arm64) — مكتبات جاهزة رسميًا عبر MSYS2/MinGW
-  # ─────────────────────────────────────────────
-  build-windows:
+  build:
     needs: cleanup
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: windows_x86_64
-            runner: windows-latest
-            msystem: MINGW64
-            pkg_prefix: mingw-w64-x86_64
-          - target: windows_x86
-            runner: windows-latest
-            msystem: MINGW32
-            pkg_prefix: mingw-w64-i686
-          - target: windows_arm64
-            runner: windows-11-arm
-            msystem: CLANGARM64
-            pkg_prefix: mingw-w64-clang-aarch64
+          - target: windows-x86_64
+            os: windows-latest
+            python-arch: x64
+            ext: ".exe"
+          - target: windows-x86_32
+            os: windows-latest
+            python-arch: x86
+            ext: ".exe"
+          - target: windows-arm64
+            os: windows-11-arm
+            python-arch: arm64
+            ext: ".exe"
+          - target: linux-x86_64
+            os: ubuntu-latest
+            python-arch: x64
+            ext: ""
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+            python-arch: arm64
+            ext: ""
+          - target: macos-arm64
+            os: macos-14
+            python-arch: arm64
+            ext: ""
 
-    runs-on: ${{ matrix.runner }}
-    defaults:
-      run:
-        shell: msys2 {0}
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up MSYS2 (${{ matrix.msystem }})
-        uses: msys2/setup-msys2@v2
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          msystem: ${{ matrix.msystem }}
-          update: true
-          install: >-
-            base-devel
-            ${{ matrix.pkg_prefix }}-toolchain
-            ${{ matrix.pkg_prefix }}-libpng
-            ${{ matrix.pkg_prefix }}-libjpeg-turbo
-            ${{ matrix.pkg_prefix }}-giflib
-            ${{ matrix.pkg_prefix }}-libtiff
-            ${{ matrix.pkg_prefix }}-libwebp
-
-      - name: Build (${{ matrix.target }})
-        run: |
-          mkdir -p dist
-          gcc -O3 -std=c11 -Wall -Wextra \
-            "$SRC_PATH" \
-            -lpng -ljpeg -lgif -ltiff -lwebp -lz -lm \
-            -o "dist/ps1_tim_tool_${{ matrix.target }}.exe"
-
-      - name: Upload to v1.0.0 release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload v1.0.0 "dist/ps1_tim_tool_${{ matrix.target }}.exe" --repo "$GITHUB_REPOSITORY" --clobber
-
-
-
-  # ─────────────────────────────────────────────
-  # Linux (x86_64 / x86 / arm64) — مكتبات جاهزة رسميًا عبر apt
-  # ─────────────────────────────────────────────
-  build-linux:
-    needs: cleanup
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: linux_x86_64
-            runner: ubuntu-latest
-            m32: false
-          - target: linux_x86
-            runner: ubuntu-latest
-            m32: true
-          - target: linux_arm64
-            runner: ubuntu-24.04-arm
-            m32: false
-
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install dependencies (64-bit / arm64)
-        if: matrix.m32 == false
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libpng-dev libjpeg-dev libgif-dev libtiff-dev libwebp-dev
-
-      - name: Install dependencies (x86 32-bit عبر multiarch)
-        if: matrix.m32 == true
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install -y gcc-multilib g++-multilib \
-            libpng-dev:i386 libjpeg-dev:i386 libgif-dev:i386 libtiff-dev:i386 libwebp-dev:i386
-
-      - name: Build (${{ matrix.target }})
-        run: |
-          mkdir -p dist
-          gcc -O3 -std=c11 -Wall -Wextra ${{ matrix.m32 && '-m32' || '' }} \
-            "$SRC_PATH" \
-            -lpng -ljpeg -lgif -ltiff -lwebp -lz -lm \
-            -o "dist/ps1_tim_tool_${{ matrix.target }}"
-
-      - name: Upload to v1.0.0 release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload v1.0.0 "dist/ps1_tim_tool_${{ matrix.target }}" --repo "$GITHUB_REPOSITORY" --clobber
-
-
-
-  # ─────────────────────────────────────────────
-  # macOS (arm64 / x86_64) — مكتبات جاهزة رسميًا عبر Homebrew
-  # ─────────────────────────────────────────────
-  build-macos:
-    needs: cleanup
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: macos_arm64
-            runner: macos-14
-          - target: macos_x86_64
-            runner: macos-13
-
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+          python-version: "3.12"
+          architecture: ${{ matrix.python-arch }}
 
       - name: Install dependencies
         run: |
-          brew install libpng jpeg giflib libtiff webp
+          python -m pip install --upgrade pip
+          pip install pyinstaller Pillow
 
-      - name: Build (${{ matrix.target }})
+      - name: Build executable with PyInstaller
         run: |
-          mkdir -p dist
-          BREW_PREFIX=$(brew --prefix)
-          gcc -O3 -std=c11 -Wall -Wextra \
-            -I"$BREW_PREFIX/include" -L"$BREW_PREFIX/lib" \
-            "$SRC_PATH" \
-            -lpng -ljpeg -lgif -ltiff -lwebp -lz -lm \
-            -o "dist/ps1_tim_tool_${{ matrix.target }}"
+          pyinstaller --onefile --name "ps2-tim2-tool-${{ matrix.target }}" ps2_tim2_tool.py
 
       - name: Upload to v1.0.0 release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
-          gh release upload v1.0.0 "dist/ps1_tim_tool_${{ matrix.target }}" --repo "$GITHUB_REPOSITORY" --clobber
-
-
-
-  # ─────────────────────────────────────────────
-  # Android (4 معماريات) — المكتبات غير متوفرة رسميًا، تُبنى من المصدر عبر vcpkg + NDK
-  # ─────────────────────────────────────────────
-  build-android:
-    needs: cleanup
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64-v8a
-            triplet: arm64-android
-            ndk_target: aarch64-linux-android
-          - arch: armeabi-v7a
-            triplet: arm-neon-android
-            ndk_target: armv7a-linux-androideabi
-          - arch: x86
-            triplet: x86-android
-            ndk_target: i686-linux-android
-          - arch: x86_64
-            triplet: x64-android
-            ndk_target: x86_64-linux-android
-
-    env:
-      NDK_API: 21
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Android NDK
-        id: setup-ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27c
-
-      - name: Bootstrap vcpkg
-        run: |
-          git clone https://github.com/microsoft/vcpkg.git
-          ./vcpkg/bootstrap-vcpkg.sh
-
-      - name: Build dependencies from source (${{ matrix.triplet }})
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: |
-          ./vcpkg/vcpkg install libpng libjpeg-turbo giflib tiff libwebp --triplet=${{ matrix.triplet }}
-
-      - name: Build (android-${{ matrix.arch }})
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: |
-          mkdir -p dist
-          CLANG="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.ndk_target }}${{ env.NDK_API }}-clang"
-          VCPKG_DIR="vcpkg/installed/${{ matrix.triplet }}"
-          "$CLANG" -O3 -std=c11 -Wall -Wextra \
-            -I"$VCPKG_DIR/include" -L"$VCPKG_DIR/lib" \
-            "$SRC_PATH" \
-            -lpng16 -ljpeg -lgif -ltiff -lwebp -lz -lm -static-libgcc \
-            -o "dist/ps1_tim_tool_android_${{ matrix.arch }}"
-
-      - name: Upload to v1.0.0 release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload v1.0.0 "dist/ps1_tim_tool_android_${{ matrix.arch }}" --repo "$GITHUB_REPOSITORY" --clobber
-
-
-
-  # ─────────────────────────────────────────────
-  # iOS (arm64 / x86_64) — المكتبات غير متوفرة رسميًا، تُبنى من المصدر عبر vcpkg
-  # ─────────────────────────────────────────────
-  build-ios:
-    needs: cleanup
-    runs-on: macos-14
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            triplet: arm64-ios
-            sdk: iphoneos
-            clang_arch: arm64
-            min_version_flag: "-mios-version-min=13.0"
-          - arch: x86_64
-            triplet: x64-ios
-            sdk: iphonesimulator
-            clang_arch: x86_64
-            min_version_flag: "-mios-simulator-version-min=13.0"
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Bootstrap vcpkg
-        run: |
-          git clone https://github.com/microsoft/vcpkg.git
-          ./vcpkg/bootstrap-vcpkg.sh
-
-      - name: Build dependencies from source (${{ matrix.triplet }})
-        run: |
-          ./vcpkg/vcpkg install libpng libjpeg-turbo giflib tiff libwebp --triplet=${{ matrix.triplet }}
-
-      - name: Build (ios-${{ matrix.arch }})
-        run: |
-          mkdir -p dist
-          SDK_PATH=$(xcrun --sdk ${{ matrix.sdk }} --show-sdk-path)
-          VCPKG_DIR="vcpkg/installed/${{ matrix.triplet }}"
-          clang -O3 -std=c11 -Wall -Wextra \
-            -arch ${{ matrix.clang_arch }} -isysroot "$SDK_PATH" ${{ matrix.min_version_flag }} \
-            -I"$VCPKG_DIR/include" -L"$VCPKG_DIR/lib" \
-            "$SRC_PATH" \
-            -lpng16 -ljpeg -lgif -ltiff -lwebp -lz -lm \
-            -o "dist/ps1_tim_tool_ios_${{ matrix.arch }}"
-
-      - name: Upload to v1.0.0 release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload v1.0.0 "dist/ps1_tim_tool_ios_${{ matrix.arch }}" --repo "$GITHUB_REPOSITORY" --clobber
+          FILE="dist/ps2-tim2-tool-${{ matrix.target }}${{ matrix.ext }}"
+          gh release upload v1.0.0 "$FILE" --repo "$GITHUB_REPOSITORY" --clobber
