@@ -103,3 +103,56 @@ jobs:
         run: |
           FILE="dist/ps2-tim2-tool-${{ matrix.target }}${{ matrix.ext }}"
           gh release upload v1.0.0 "$FILE" --repo "$GITHUB_REPOSITORY" --clobber
+
+
+
+  build-android:
+    needs: cleanup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64-v8a
+            docker_tag: aarch64
+          - arch: armeabi-v7a
+            docker_tag: arm
+          - arch: x86_64
+            docker_tag: x86_64
+          - arch: x86
+            docker_tag: i686
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (لمحاكاة المعماريات غير الأصلية)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build inside Termux container (${{ matrix.arch }})
+        run: |
+          mkdir -p dist
+          docker run --rm --privileged \
+            -v "${{ github.workspace }}:/workdir" \
+            -w /workdir \
+            "termux/termux-docker:${{ matrix.docker_tag }}" \
+            bash -lc "
+              set -e
+              pkg update -y
+              pkg install -yq python build-essential
+              pip install --upgrade pip
+              pip install pyinstaller Pillow
+              pyinstaller --onefile --name ps2-tim2-tool-android-${{ matrix.arch }} ps2_tim2_tool.py
+            "
+
+      - name: Verify output
+        run: |
+          ls -la "dist/ps2-tim2-tool-android-${{ matrix.arch }}"
+          file "dist/ps2-tim2-tool-android-${{ matrix.arch }}"
+
+      - name: Upload to v1.0.0 release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          FILE="dist/ps2-tim2-tool-android-${{ matrix.arch }}"
+          gh release upload v1.0.0 "$FILE" --repo "$GITHUB_REPOSITORY" --clobber
