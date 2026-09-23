@@ -140,7 +140,6 @@ jobs:
               set -e
               pkg update -y
               pkg install -yq python build-essential
-              pip install --upgrade pip
               pip install pyinstaller Pillow
               pyinstaller --onefile --name ps2-tim2-tool-android-${{ matrix.arch }} ps2_tim2_tool.py
             "
