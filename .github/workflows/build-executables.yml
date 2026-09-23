@@ -136,13 +136,15 @@ jobs:
             -v "${{ github.workspace }}:/workdir" \
             -w /workdir \
             "termux/termux-docker:${{ matrix.docker_tag }}" \
-            bash -lc "
-              set -e
-              pkg update -y
-              pkg install -yq python build-essential
-              pip install pyinstaller Pillow
-              pyinstaller --onefile --name ps2-tim2-tool-android-${{ matrix.arch }} ps2_tim2_tool.py
-            "
+            bash -s <<'EOF'
+          set -e
+          echo "deb https://packages.termux.dev/apt/termux-main stable main" > $PREFIX/etc/apt/sources.list
+          pkg update -y
+          pkg install -yq python build-essential
+          command -v ldd >/dev/null 2>&1 || { printf '#!/data/data/com.termux/files/usr/bin/sh\nexit 1\n' > $PREFIX/bin/ldd && chmod +x $PREFIX/bin/ldd; }
+          pip install pyinstaller Pillow
+          pyinstaller --onefile --name ps2-tim2-tool-android-${{ matrix.arch }} ps2_tim2_tool.py
+          EOF
 
       - name: Verify output
         run: |
