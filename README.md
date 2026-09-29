@@ -1,15 +1,21 @@
 # PS2 TIM2 Tool
 
-⭐ If this tool saved you time, consider starring the repo — it helps others find it too.
+⭐ If this tool saved you time, consider starring the repo. It helps others find it too.
 
 ![PS2 TIM2 Tool demo](assets/demo.png)
 
-
 ![TIM2 file proof](assets/demo_proof.png)
 
-A complete TIM2 (`.tm2`) texture toolkit for the PlayStation 2. Convert standard images into PS2-native TIM2 textures, extract existing TIM2 files back into regular images, inspect their internal structure, verify their integrity, and diff two TIM2 files to check compatibility — all from a single command-line script.
+A complete TIM2 (`.tm2`) texture toolkit for the PlayStation 2. Convert standard images into PS2-native TIM2 textures, extract existing TIM2 files back into regular images, inspect their internal structure, verify their integrity, and diff two TIM2 files to check compatibility, all from the command line.
 
 Built for PS2 homebrew development, game modding, and texture pipeline work, with accurate handling of GS pixel formats, CLUT palettes, VRAM swizzling, and mipmap chains.
+
+The tool is available in **two implementations with the same command-line interface**:
+
+| Implementation | Location | Best for |
+|---|---|---|
+| **C** (native) | [`src/c/ps2_tim2_tool.c`](src/c/ps2_tim2_tool.c) | Standalone prebuilt executables, no runtime needed, fastest |
+| **Python** | [`src/py/ps2_tim2_tool.py`](src/py/ps2_tim2_tool.py) | Easy to read, modify and run anywhere Python + Pillow are available |
 
 ## Features
 
@@ -17,202 +23,172 @@ Built for PS2 homebrew development, game modding, and texture pipeline work, wit
 - **TIM2 → Image extraction**, converting `.tm2` files back into common image formats
 - **CLUT (palette) generation** for indexed formats, including proper 8-bit CLUT swizzling
 - **GS VRAM swizzle** support for 32-bit and 16-bit formats
-- **Mipmap chain generation** for all formats — 32-bit, 24-bit, 16-bit, 8-bit indexed, and 4-bit indexed
+- **Mipmap chain generation** for all formats
 - **Alpha premultiplication**, matching PS2 GS rendering behavior (32-bit and 16-bit)
 - **Floyd–Steinberg dithering** for 4-bit and 8-bit indexed output
-- **Power-of-2 dimension handling**, with optional automatic resize up or down
+- **Power-of-2 dimension handling**, with optional automatic resize up or down (Lanczos)
 - **Batch conversion** from wildcards or a text list file
 - **`.tm2` file inspection** (`--info`) showing header, format, CLUT, and GS Tex0 data
 - **`.tm2` integrity verification** (`--verify`) with a 12-point structural check
-- **`.tm2` diff / compatibility check** (`--diff`) comparing an original file against a modified one — format, dimensions, file size, transparency, and pixel-level changes, with a SAFE / WARNING / UNSAFE verdict
+- **`.tm2` diff / compatibility check** (`--diff`) comparing an original file against a modified one (format, dimensions, file size, transparency, and pixel-level changes) with a SAFE / WARNING / UNSAFE verdict
+- **Native C build** with all image codecs handled in-process, no external converter needed
 
-## Requirements
+## Installation
 
-- Python 3
-- [Pillow](https://pypi.org/project/Pillow/) (`PIL`)
+### Option 1: Prebuilt binaries (no Python required)
 
-Install Pillow with:
+Prebuilt executables built from the C version are published on the [Releases](https://github.com/PS2HomeDeveloper/ps2-tim2-tool/releases) page. Download the file for your platform and run it directly, no installation and no dependencies.
 
+| Platform | Architectures | File name pattern |
+|---|---|---|
+| Windows | x86_64, x86, arm64 | `ps2_tim2_tool_windows_<arch>.exe` |
+| Linux | x86_64, x86, arm64 | `ps2_tim2_tool_linux_<arch>` |
+| macOS | arm64, x86_64 | `ps2_tim2_tool_macos_<arch>` |
+| Android | arm64-v8a, armeabi-v7a, x86, x86_64 | `ps2_tim2_tool_android_<arch>` |
+| iOS | arm64, x86_64 (simulator) | `ps2_tim2_tool_ios_<arch>` |
+
+On Linux, macOS and Android, make the file executable first:
+
+```bash
+chmod +x ps2_tim2_tool_linux_x86_64
+./ps2_tim2_tool_linux_x86_64 --list-formats
 ```
+
+### Option 2: Run the Python version
+
+Requires Python 3 and [Pillow](https://pypi.org/project/Pillow/).
+
+```bash
+git clone https://github.com/PS2HomeDeveloper/ps2-tim2-tool.git
+cd ps2-tim2-tool
 pip install Pillow
+python3 src/py/ps2_tim2_tool.py --list-formats
 ```
 
-## Supported Input Image Formats
+### Option 3: Build the C version yourself
+
+The C version needs a C11 compiler and the development libraries for `libpng`, `libjpeg`, `giflib`, `libtiff`, `libwebp`, `zlib` and `libm`.
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install gcc libpng-dev libjpeg-dev libgif-dev libtiff-dev libwebp-dev
+
+# macOS (Homebrew)
+brew install libpng jpeg giflib libtiff webp
+
+# Build
+gcc -O3 -std=c11 -Wall -Wextra src/c/ps2_tim2_tool.c \
+    -lpng -ljpeg -lgif -ltiff -lwebp -lz -lm -o ps2_tim2_tool
+```
+
+On macOS with Homebrew, add `-I"$(brew --prefix)/include" -L"$(brew --prefix)/lib"` to the command. On Windows, build with MSYS2/MinGW; the official workflow in [`.github/workflows/build-executables.yml`](.github/workflows/build-executables.yml) shows the exact setup, including the small compatibility shim used for `mkdir` and `getline`.
+
+## Supported Formats
+
+### Input image formats
 
 `.png` `.jpg` `.jpeg` `.bmp` `.tga` `.tiff` `.tif` `.webp` `.gif` `.ppm` `.pgm` `.pbm` `.ico` `.dds`
 
-## Supported Output Formats (image extraction from `.tm2`)
+### Extraction formats (`--extract`)
 
 `.png` `.jpg` `.jpeg` `.bmp` `.tga` `.tiff` `.tif` `.webp` `.ppm`
 
-## TIM2 Output Formats
+### TIM2 output formats
 
 | Format | Description |
 |---|---|
-| `32bit` | RGBA8888 — full color + 8-bit alpha — best for textures |
-| `24bit` | RGB888 — full color, no alpha — backgrounds and opaque textures |
-| `16bit` | RGBA5551 — 32K colors + 1-bit alpha — smaller file size |
-| `8bit`  | Indexed8 — 256 colors + CLUT — characters, environments |
-| `4bit`  | Indexed4 — 16 colors + CLUT — icons, UI elements |
+| `32bit` | RGBA8888: full color + 8-bit alpha, best for textures |
+| `24bit` | RGB888: full color, no alpha, for backgrounds and opaque textures |
+| `16bit` | RGBA5551: 32K colors + 1-bit alpha, smaller file size |
+| `8bit`  | Indexed8: 256 colors + CLUT, for characters and environments |
+| `4bit`  | Indexed4: 16 colors + CLUT, for icons and UI elements |
 
 ## Usage
 
+The examples below use the Python version. With the C version, replace `python3 src/py/ps2_tim2_tool.py` with `./ps2_tim2_tool` (or the name of the prebuilt binary). All options are identical.
+
 ### Convert an image to TIM2
 
-```
-python3 ps2_tim2_tool.py (filename) --format 32bit
-```
-
-```
-python3 ps2_tim2_tool.py (filename) --format 24bit
-```
-
-```
-python3 ps2_tim2_tool.py (filename) --format 16bit
-```
-
-```
-python3 ps2_tim2_tool.py (filename) --format 8bit
-```
-
-```
-python3 ps2_tim2_tool.py (filename) --format 4bit
+```bash
+python3 src/py/ps2_tim2_tool.py image.png --format 32bit
+python3 src/py/ps2_tim2_tool.py image.png --format 24bit
+python3 src/py/ps2_tim2_tool.py image.png --format 16bit
+python3 src/py/ps2_tim2_tool.py image.png --format 8bit
+python3 src/py/ps2_tim2_tool.py image.png --format 4bit
 ```
 
 ### Convert multiple images at once
 
-```
-python3 ps2_tim2_tool.py (filename) (filename) (filename) --format 32bit
-```
-
-### Convert with dithering (4-bit / 8-bit only)
-
-```
-python3 ps2_tim2_tool.py (filename) --format 8bit --dither
+```bash
+python3 src/py/ps2_tim2_tool.py a.png b.png c.png --format 32bit
 ```
 
-### Convert without alpha premultiplication
+### Common options
 
-```
-python3 ps2_tim2_tool.py (filename) --format 32bit --no-premult
-```
+```bash
+# Dithering (4-bit / 8-bit only)
+python3 src/py/ps2_tim2_tool.py image.png --format 8bit --dither
 
-### Convert with a specific output file path
+# Disable alpha premultiplication
+python3 src/py/ps2_tim2_tool.py image.png --format 32bit --no-premult
 
-```
-python3 ps2_tim2_tool.py (filename) --format 32bit --output (filename)
-```
+# Specific output file or directory
+python3 src/py/ps2_tim2_tool.py image.png --format 32bit --output out.tm2
+python3 src/py/ps2_tim2_tool.py image.png --format 32bit --output-dir out/
 
-### Convert with a specific output directory
+# Resize non-power-of-2 images to the nearest power of 2
+python3 src/py/ps2_tim2_tool.py image.png --format 32bit --resize up
+python3 src/py/ps2_tim2_tool.py image.png --format 32bit --resize down
 
-```
-python3 ps2_tim2_tool.py (filename) --format 32bit --output-dir (directory)
-```
+# GS VRAM swizzle (32-bit / 16-bit only)
+python3 src/py/ps2_tim2_tool.py image.png --format 32bit --swizzle
 
-### Resize non-power-of-2 images automatically
+# Full mipmap chain (all formats)
+python3 src/py/ps2_tim2_tool.py image.png --format 32bit --mipmaps
 
-```
-python3 ps2_tim2_tool.py (filename) --format 32bit --resize up
-```
-
-```
-python3 ps2_tim2_tool.py (filename) --format 32bit --resize down
-```
-
-### Apply GS VRAM swizzle (32-bit / 16-bit only)
-
-```
-python3 ps2_tim2_tool.py (filename) --format 32bit --swizzle
+# Combine options
+python3 src/py/ps2_tim2_tool.py image.png --format 32bit --swizzle --mipmaps --resize up
 ```
 
-### Generate a full mipmap chain (all formats)
+### Batch convert from a text list file
 
-```
-python3 ps2_tim2_tool.py (filename) --format 32bit --mipmaps
-```
-
-### Combine multiple options
-
-```
-python3 ps2_tim2_tool.py (filename) --format 32bit --swizzle --mipmaps --resize up
+```bash
+python3 src/py/ps2_tim2_tool.py --list convert.txt
 ```
 
-### Convert a batch of images from a text list file
+### Inspect, verify and extract
 
-```
-python3 ps2_tim2_tool.py --list (filename)
-```
+```bash
+# Show header, format, CLUT and GS Tex0 data
+python3 src/py/ps2_tim2_tool.py texture.tm2 --info
 
-### Inspect an existing TIM2 file
+# Run the 12-point integrity check
+python3 src/py/ps2_tim2_tool.py texture.tm2 --verify
 
-```
-python3 ps2_tim2_tool.py (filename) --info
-```
-
-### Verify the integrity of a TIM2 file
-
-```
-python3 ps2_tim2_tool.py (filename) --verify
+# Extract back to an image (png, jpg, bmp, tga, tiff, webp, ppm)
+python3 src/py/ps2_tim2_tool.py texture.tm2 --extract png
 ```
 
 ### Compare an original TIM2 against a modified one
 
-```
-python3 ps2_tim2_tool.py --diff --original (filename) --modified (filename)
-```
+```bash
+# One pair
+python3 src/py/ps2_tim2_tool.py --diff --original orig.tm2 --modified edited.tm2
 
-### Compare multiple file pairs at once
+# Multiple pairs
+python3 src/py/ps2_tim2_tool.py --diff --original a.tm2 b.tm2 --modified a_edit.tm2 b_edit.tm2
 
-```
-python3 ps2_tim2_tool.py --diff --original (filename) (filename) --modified (filename) (filename)
-```
+# Two whole folders
+python3 src/py/ps2_tim2_tool.py --diff --original orig_dir/ --modified mod_dir/
 
-### Compare two entire folders of TIM2 files
-
-```
-python3 ps2_tim2_tool.py --diff --original (directory) --modified (directory)
-```
-
-### Compare using a text list of file pairs
-
-```
-python3 ps2_tim2_tool.py --diff-list (filename)
-```
-
-### Extract a TIM2 file back into an image
-
-```
-python3 ps2_tim2_tool.py (filename) --extract png
-```
-
-```
-python3 ps2_tim2_tool.py (filename) --extract jpg
-```
-
-```
-python3 ps2_tim2_tool.py (filename) --extract bmp
-```
-
-```
-python3 ps2_tim2_tool.py (filename) --extract tga
-```
-
-```
-python3 ps2_tim2_tool.py (filename) --extract tiff
-```
-
-```
-python3 ps2_tim2_tool.py (filename) --extract webp
-```
-
-```
-python3 ps2_tim2_tool.py (filename) --extract ppm
+# From a text list of pairs
+python3 src/py/ps2_tim2_tool.py --diff-list pairs.txt
 ```
 
 ### List all available formats and options
 
-```
-python3 ps2_tim2_tool.py --list-formats
+```bash
+python3 src/py/ps2_tim2_tool.py --list-formats
 ```
 
 ## All Options
@@ -229,23 +205,25 @@ python3 ps2_tim2_tool.py --list-formats
 | `--mipmaps` | Generate a full mipmap chain stored in the TIM2 file (all formats) |
 | `--info` | Read and display info from an existing `.tm2` file |
 | `--verify` | Verify the integrity of a `.tm2` file (12 checks) |
+| `--extract EXT` | Extract TIM2 to an image format |
 | `--diff` | Compare an original TIM2 file (or folder) against a modified one |
 | `--original PATH ...` | One or more original TIM2 files, or one folder (used with `--diff`) |
 | `--modified PATH ...` | One or more modified TIM2 files, or one folder (used with `--diff`) |
-| `--diff-list FILE.TXT` | Text file listing original/modified pairs to compare, one pair per line |
-| `--list` | Convert images listed in a text file (filename + format per line) |
-| `--extract` | Extract TIM2 to an image format |
+| `--diff-list FILE.TXT` | Text file listing original/modified pairs, one pair per line |
+| `--list FILE.TXT` | Convert images listed in a text file (filename + format per line) |
 | `--list-formats`, `-l` | List available formats and options |
+| `--version` | C version: print the tool version |
+| `-h`, `--help` | Show help |
 
 ## List File Format
 
 When using `--list`, provide a plain text file with one entry per line, containing the filename and target format:
 
 ```
-(filename) 32bit
-(filename) 24bit
-(filename) 16bit
-(filename) 8bit
+hero.png     32bit
+bg.png       24bit
+sprite.png   16bit
+font.png     8bit
 ```
 
 ## Diff List File Format
@@ -254,8 +232,8 @@ When using `--diff-list`, provide a plain text file with a header line followed 
 
 ```
 original              modified
-(filename)             (filename)
-(filename)             (filename)
+hero.tm2              hero_edit.tm2
+bg.tm2                bg_edit.tm2
 ```
 
 Blank lines and lines starting with `#` are ignored.
@@ -264,36 +242,52 @@ Blank lines and lines starting with `#` are ignored.
 
 Running `--diff` prints a per-file report checking:
 
-- **Format** — whether the pixel format changed
-- **Dimensions** — whether width or height changed
-- **File size** — before and after, with the difference
-- **Transparency** — whether an alpha channel was lost, gained, or unchanged
-- **Pixel diff** — percentage of pixels changed and the maximum color difference (only when format and dimensions match)
+- **Format**: whether the pixel format changed
+- **Dimensions**: whether width or height changed
+- **File size**: before and after, with the difference
+- **Transparency**: whether an alpha channel was lost, gained, or unchanged
+- **Pixel diff**: percentage of pixels changed and the maximum color difference (only when format and dimensions match)
 
 Each file gets a final verdict:
 
 | Verdict | Meaning |
 |---|---|
-| `SAFE` | No issues or warnings — safe to inject back into the game |
+| `SAFE` | No issues or warnings, safe to inject back into the game |
 | `WARNING` | No blocking issues, but review the warnings (e.g. file size or transparency changed) |
-| `UNSAFE` | Format or dimensions changed — the game may crash or render incorrectly |
+| `UNSAFE` | Format or dimensions changed, so the game may crash or render incorrectly |
 
 Comparing two folders also reports any files present in one folder but missing from the other, plus a summary count of SAFE / WARNING / UNSAFE results across all compared files.
 
 ## Notes
 
 - Non-power-of-2 images are still converted by default, with a warning. Use `--resize up` or `--resize down` to force power-of-2 dimensions.
-- The `--swizzle` option applies only to `32bit` and `16bit` formats.
-- The `--mipmaps` option applies to all five formats (`32bit`, `24bit`, `16bit`, `8bit`, `4bit`).
-- The `--dither` option applies only to `4bit` and `8bit` formats.
-- The `24bit` format stores no alpha channel — every pixel is fully opaque, so `--no-premult` and `--swizzle` have no effect on it.
+- `--swizzle` applies only to `32bit` and `16bit` formats.
+- `--mipmaps` applies to all five formats.
+- `--dither` applies only to `4bit` and `8bit` formats.
+- The `24bit` format stores no alpha channel, so every pixel is fully opaque and `--no-premult` and `--swizzle` have no effect on it.
 - When extracting a TIM2 file to a format without alpha support (`.jpg`, `.bmp`, `.ppm`), transparency is composited onto a white background.
 - `--diff` requires either `--diff-list`, or both `--original` and `--modified` together.
 
-## Releases
+## Project structure
 
-Don't have Python installed, or just want to run the tool without setting up an environment? Check the [Releases](../../releases) page for ready-to-use executable builds — no Python or dependencies required, just download and run.
+```
+ps2-tim2-tool/
+├── src/
+│   ├── c/ps2_tim2_tool.c      # native C implementation
+│   └── py/ps2_tim2_tool.py    # Python implementation
+├── assets/                    # demo images used in this README
+├── .github/workflows/
+│   └── build-executables.yml  # builds all release binaries
+├── LICENSE
+└── README.md
+```
+
+The **Build Executables** GitHub Actions workflow is started manually (`workflow_dispatch`). It compiles the C source for every platform listed above and uploads the results to the `v1.0.0` release, replacing the previous files.
+
+## Contributing
+
+Issues and pull requests are welcome. Changes to behavior should be applied to **both** the C and Python versions so they stay in sync.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE) — see the `LICENSE` file for details.
+This project is licensed under the [MIT License](LICENSE). See the `LICENSE` file for details.
