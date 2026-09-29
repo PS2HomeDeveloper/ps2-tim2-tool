@@ -14,20 +14,6 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     steps:
-      - name: Delete existing release assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          assets=$(gh release view v1.0.0 --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
-          if [ -z "$assets" ]; then
-            echo "لا توجد ملفات مرفوعة حاليًا بالإصدار."
-          else
-            for name in $assets; do
-              echo "حذف: $name"
-              gh release delete-asset v1.0.0 "$name" --repo "$GITHUB_REPOSITORY" -y
-            done
-          fi
-
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -40,11 +26,22 @@ jobs:
           git tag -f v1.0.0
           git push origin v1.0.0 --force
 
+      - name: Ensure release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view v1.0.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create v1.0.0 --repo "$GITHUB_REPOSITORY" --title "v1.0.0" --notes "Prebuilt executables"
 
+      - name: Delete existing release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for name in $(gh release view v1.0.0 --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name'); do
+            echo "Deleting: $name"
+            gh release delete-asset v1.0.0 "$name" --repo "$GITHUB_REPOSITORY" -y
+          done
 
-  # ─────────────────────────────────────────────
-  # Windows (x86_64 / x86 / arm64) — مكتبات جاهزة رسميًا عبر MSYS2/MinGW
-  # ─────────────────────────────────────────────
   build-windows:
     needs: cleanup
     strategy:
@@ -98,7 +95,7 @@ jobs:
           #include <stdio.h>
           #include <stdlib.h>
           #define mkdir(path, mode) mkdir(path)
-          static ssize_t ps1_getline(char **lineptr, size_t *n, FILE *stream) {
+          static ssize_t compat_getline(char **lineptr, size_t *n, FILE *stream) {
               if (*lineptr == NULL || *n == 0) {
                   *n = 128;
                   *lineptr = (char *)malloc(*n);
@@ -121,7 +118,7 @@ jobs:
               (*lineptr)[pos] = '\0';
               return (ssize_t)pos;
           }
-          #define getline ps1_getline
+          #define getline compat_getline
           PRELUDE_EOF
           ${{ matrix.compiler }} -O3 -std=gnu11 -Wall -Wextra \
             -include /tmp/win_compat_prelude.h \
@@ -136,11 +133,6 @@ jobs:
         run: |
           gh release upload v1.0.0 "dist/ps2_tim2_tool_${{ matrix.target }}.exe" --repo "$GITHUB_REPOSITORY" --clobber
 
-
-
-  # ─────────────────────────────────────────────
-  # Linux (x86_64 / x86 / arm64) — مكتبات جاهزة رسميًا عبر apt
-  # ─────────────────────────────────────────────
   build-linux:
     needs: cleanup
     strategy:
@@ -168,7 +160,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libpng-dev libjpeg-dev libgif-dev libtiff-dev libwebp-dev
 
-      - name: Install dependencies (x86 32-bit عبر multiarch)
+      - name: Install dependencies (x86 32-bit)
         if: matrix.m32 == true
         run: |
           sudo dpkg --add-architecture i386
@@ -190,11 +182,6 @@ jobs:
         run: |
           gh release upload v1.0.0 "dist/ps2_tim2_tool_${{ matrix.target }}" --repo "$GITHUB_REPOSITORY" --clobber
 
-
-
-  # ─────────────────────────────────────────────
-  # macOS arm64 — مكتبات جاهزة رسميًا عبر Homebrew (تشغيل أصلي)
-  # ─────────────────────────────────────────────
   build-macos-arm64:
     needs: cleanup
     runs-on: macos-14
@@ -222,12 +209,6 @@ jobs:
         run: |
           gh release upload v1.0.0 "dist/ps2_tim2_tool_macos_arm64" --repo "$GITHUB_REPOSITORY" --clobber
 
-
-
-  # ─────────────────────────────────────────────
-  # macOS x86_64 — بدون انتظار جهاز Intel حقيقي (نادر جدًا في GitHub الآن):
-  # cross-compile على نفس جهاز arm64 عبر vcpkg (مكتبات تُبنى من المصدر لهدف x64-osx)
-  # ─────────────────────────────────────────────
   build-macos-x86_64:
     needs: cleanup
     runs-on: macos-14
@@ -243,10 +224,6 @@ jobs:
       - name: Build dependencies from source (x64-osx)
         run: |
           ./vcpkg/vcpkg install libpng libjpeg-turbo giflib tiff libwebp --triplet=x64-osx
-
-      - name: List installed libraries (تشخيص)
-        run: |
-          ls -la vcpkg/installed/x64-osx/lib || true
 
       - name: Build (macos_x86_64)
         run: |
@@ -264,11 +241,6 @@ jobs:
         run: |
           gh release upload v1.0.0 "dist/ps2_tim2_tool_macos_x86_64" --repo "$GITHUB_REPOSITORY" --clobber
 
-
-
-  # ─────────────────────────────────────────────
-  # Android (4 معماريات) — المكتبات غير متوفرة رسميًا، تُبنى من المصدر عبر vcpkg + NDK
-  # ─────────────────────────────────────────────
   build-android:
     needs: cleanup
     runs-on: ubuntu-latest
@@ -313,10 +285,6 @@ jobs:
         run: |
           ./vcpkg/vcpkg install libpng libjpeg-turbo giflib tiff libwebp --triplet=${{ matrix.triplet }}
 
-      - name: List installed libraries (تشخيص)
-        run: |
-          ls -la vcpkg/installed/${{ matrix.triplet }}/lib || true
-
       - name: Build (android-${{ matrix.arch }})
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
@@ -339,11 +307,6 @@ jobs:
         run: |
           gh release upload v1.0.0 "dist/ps2_tim2_tool_android_${{ matrix.arch }}" --repo "$GITHUB_REPOSITORY" --clobber
 
-
-
-  # ─────────────────────────────────────────────
-  # iOS (arm64 / x86_64) — المكتبات غير متوفرة رسميًا، تُبنى من المصدر عبر vcpkg
-  # ─────────────────────────────────────────────
   build-ios:
     needs: cleanup
     runs-on: macos-14
@@ -374,10 +337,6 @@ jobs:
       - name: Build dependencies from source (${{ matrix.triplet }})
         run: |
           ./vcpkg/vcpkg install libpng libjpeg-turbo giflib tiff libwebp --triplet=${{ matrix.triplet }}
-
-      - name: List installed libraries (تشخيص)
-        run: |
-          ls -la vcpkg/installed/${{ matrix.triplet }}/lib || true
 
       - name: Build (ios-${{ matrix.arch }})
         run: |
