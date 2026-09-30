@@ -120,7 +120,7 @@ jobs:
           }
           #define getline compat_getline
           PRELUDE_EOF
-          ${{ matrix.compiler }} -O3 -std=gnu11 -Wall -Wextra \
+          ${{ matrix.compiler }} -O3 -flto -std=gnu11 -Wall -Wextra \
             -include /tmp/win_compat_prelude.h \
             "$SRC_PATH" \
             -lpng -ljpeg -lgif -ltiff -lwebp -lz -lm \
@@ -171,7 +171,7 @@ jobs:
       - name: Build (${{ matrix.target }})
         run: |
           mkdir -p dist
-          gcc -O3 -std=c11 -Wall -Wextra ${{ matrix.m32 && '-m32' || '' }} \
+          gcc -O3 -flto -std=c11 -Wall -Wextra ${{ matrix.m32 && '-m32' || '' }} \
             "$SRC_PATH" \
             -lpng -ljpeg -lgif -ltiff -lwebp -lz -lm \
             -o "dist/ps2_tim2_tool_${{ matrix.target }}"
@@ -197,7 +197,7 @@ jobs:
         run: |
           mkdir -p dist
           BREW_PREFIX=$(brew --prefix)
-          gcc -O3 -std=c11 -Wall -Wextra \
+          gcc -O3 -flto -std=c11 -Wall -Wextra \
             -I"$BREW_PREFIX/include" -L"$BREW_PREFIX/lib" \
             "$SRC_PATH" \
             -lpng -ljpeg -lgif -ltiff -lwebp -lz -lm \
@@ -229,7 +229,7 @@ jobs:
         run: |
           mkdir -p dist
           VCPKG_DIR="vcpkg/installed/x64-osx"
-          clang -O3 -std=c11 -Wall -Wextra -arch x86_64 \
+          clang -O3 -flto -std=c11 -Wall -Wextra -arch x86_64 \
             -I"$VCPKG_DIR/include" -L"$VCPKG_DIR/lib" \
             "$SRC_PATH" \
             -lpng16 -ljpeg -lgif -ltiff -llzma -lwebp -lsharpyuv -lz -lm \
@@ -292,7 +292,7 @@ jobs:
           mkdir -p dist
           CLANG="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.ndk_target }}${{ env.NDK_API }}-clang"
           VCPKG_DIR="vcpkg/installed/${{ matrix.triplet }}"
-          "$CLANG" -O3 -std=c11 -Wall -Wextra \
+          "$CLANG" -O3 -flto -std=c11 -Wall -Wextra \
             -I"$VCPKG_DIR/include" -L"$VCPKG_DIR/lib" \
             "$SRC_PATH" \
             -Wl,--start-group \
@@ -343,7 +343,7 @@ jobs:
           mkdir -p dist
           SDK_PATH=$(xcrun --sdk ${{ matrix.sdk }} --show-sdk-path)
           VCPKG_DIR="vcpkg/installed/${{ matrix.triplet }}"
-          clang -O3 -std=c11 -Wall -Wextra \
+          clang -O3 -flto -std=c11 -Wall -Wextra \
             -arch ${{ matrix.clang_arch }} -isysroot "$SDK_PATH" ${{ matrix.min_version_flag }} \
             -I"$VCPKG_DIR/include" -L"$VCPKG_DIR/lib" -F"$VCPKG_DIR/lib" \
             "$SRC_PATH" \
