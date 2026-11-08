@@ -49,16 +49,19 @@ jobs:
       matrix:
         include:
           - target: windows_x86_64
+            artifact: windows-x86_64
             runner: windows-latest
             msystem: MINGW64
             pkg_prefix: mingw-w64-x86_64
             compiler: gcc
           - target: windows_x86
+            artifact: windows-x86
             runner: windows-latest
             msystem: MINGW32
             pkg_prefix: mingw-w64-i686
             compiler: gcc
           - target: windows_arm64
+            artifact: windows-arm64
             runner: windows-11-arm
             msystem: CLANGARM64
             pkg_prefix: mingw-w64-clang-aarch64
@@ -124,14 +127,14 @@ jobs:
             -include /tmp/win_compat_prelude.h \
             "$SRC_PATH" \
             -lpng -ljpeg -lgif -ltiff -lwebp -lz -lm \
-            -o "dist/ps2-tim2-tool-${{ replace(matrix.target, '_', '-') }}.exe"
+            -o "dist/ps2-tim2-tool-${{ matrix.artifact }}.exe"
 
       - name: Upload to v1.0.0 release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload v1.0.0 "dist/ps2-tim2-tool-${{ replace(matrix.target, '_', '-') }}.exe" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload v1.0.0 "dist/ps2-tim2-tool-${{ matrix.artifact }}.exe" --repo "$GITHUB_REPOSITORY" --clobber
 
   build-linux:
     needs: cleanup
@@ -140,12 +143,15 @@ jobs:
       matrix:
         include:
           - target: linux_x86_64
+            artifact: linux-x86_64
             runner: ubuntu-latest
             m32: false
           - target: linux_x86
+            artifact: linux-x86
             runner: ubuntu-latest
             m32: true
           - target: linux_arm64
+            artifact: linux-arm64
             runner: ubuntu-24.04-arm
             m32: false
 
@@ -174,13 +180,13 @@ jobs:
           gcc -O3 -flto -std=c11 -Wall -Wextra ${{ matrix.m32 && '-m32' || '' }} \
             "$SRC_PATH" \
             -lpng -ljpeg -lgif -ltiff -lwebp -lz -lm \
-            -o "dist/ps2-tim2-tool-${{ replace(matrix.target, '_', '-') }}"
+            -o "dist/ps2-tim2-tool-${{ matrix.artifact }}"
 
       - name: Upload to v1.0.0 release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload v1.0.0 "dist/ps2-tim2-tool-${{ replace(matrix.target, '_', '-') }}" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload v1.0.0 "dist/ps2-tim2-tool-${{ matrix.artifact }}" --repo "$GITHUB_REPOSITORY" --clobber
 
 
   build-windows-arm32:
