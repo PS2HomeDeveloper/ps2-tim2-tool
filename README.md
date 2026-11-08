@@ -19,11 +19,11 @@ The tool is available in **two implementations with the same command-line interf
 
 ## Features
 
-- **Image → TIM2 conversion** in five PS2 GS pixel formats: 32-bit, 24-bit, 16-bit, 8-bit indexed, and 4-bit indexed
+- **Image → TIM2 conversion** in the standard PS2 GS formats (32-bit, 24-bit, 16-bit, 8-bit indexed, and 4-bit indexed), plus the special `PSMCT16S`, `PSMT8H`, `PSMT4HL`, and `PSMT4HH` layouts
 - **TIM2 → Image extraction**, converting `.tm2` files back into common image formats
-- **CLUT (palette) generation** for indexed formats, including proper 8-bit CLUT swizzling
+- **CLUT (palette) generation** for indexed formats, including proper 8-bit CLUT swizzling, CSM1/CSM2 storage selection, and configurable CLUT entry formats
 - **GS VRAM swizzle** support for 32-bit and 16-bit formats
-- **Mipmap chain generation** for all formats
+- **Mipmap chain generation** for supported non-indexed formats
 - **Alpha premultiplication**, matching PS2 GS rendering behavior (32-bit and 16-bit)
 - **Floyd–Steinberg dithering** for 4-bit and 8-bit indexed output
 - **Power-of-2 dimension handling**, with optional automatic resize up or down (Lanczos)
@@ -37,7 +37,7 @@ The tool is available in **two implementations with the same command-line interf
 
 ### Option 1: Prebuilt binaries (no Python required)
 
-Prebuilt executables built from the C version are published on the [Releases](https://github.com/PS2HomeDeveloper/ps2-tim2-tool/releases) page. Download the file for your platform and run it directly, no installation and no dependencies.
+Prebuilt executables built from the C version are published on the [Releases](https://github.com/PS2HomeDeveloper/ps2-tim2-tool/releases) page. Download the file for your platform and run it directly. The C build processes image formats in-process and does not invoke external converters; depending on the target build, the executable may still require its linked system codec libraries.
 
 | Platform | Architectures | File name pattern |
 |---|---|---|
@@ -99,9 +99,13 @@ On macOS with Homebrew, add `-I"$(brew --prefix)/include" -L"$(brew --prefix)/li
 |---|---|
 | `32bit` | RGBA8888: full color + 8-bit alpha, best for textures |
 | `24bit` | RGB888: full color, no alpha, for backgrounds and opaque textures |
-| `16bit` | RGBA5551: 32K colors + 1-bit alpha, smaller file size |
-| `8bit`  | Indexed8: 256 colors + CLUT, for characters and environments |
-| `4bit`  | Indexed4: 16 colors + CLUT, for icons and UI elements |
+| `16bit` | PSMCT16 / RGBA5551: 32K colors + 1-bit alpha |
+| `16s`   | PSMCT16S: alternate 16-bit GS layout |
+| `8bit`  | PSMT8: 256 colors + CLUT |
+| `4bit`  | PSMT4: 16 colors + CLUT |
+| `8h`    | PSMT8H: indexed data stored in the high-byte lane |
+| `4hl`   | PSMT4HL: indexed data stored in the low-nibble lane of the high byte |
+| `4hh`   | PSMT4HH: indexed data stored in the high-nibble lane of the high byte |
 
 ## Usage
 
@@ -115,6 +119,12 @@ python3 src/py/ps2_tim2_tool.py image.png --format 24bit
 python3 src/py/ps2_tim2_tool.py image.png --format 16bit
 python3 src/py/ps2_tim2_tool.py image.png --format 8bit
 python3 src/py/ps2_tim2_tool.py image.png --format 4bit
+
+# Special GS storage layouts
+python3 src/py/ps2_tim2_tool.py image.png --format 16s
+python3 src/py/ps2_tim2_tool.py image.png --format 8h
+python3 src/py/ps2_tim2_tool.py image.png --format 4hl
+python3 src/py/ps2_tim2_tool.py image.png --format 4hh
 ```
 
 ### Convert multiple images at once
@@ -143,8 +153,12 @@ python3 src/py/ps2_tim2_tool.py image.png --format 32bit --resize down
 # GS VRAM swizzle (32-bit / 16-bit only)
 python3 src/py/ps2_tim2_tool.py image.png --format 32bit --swizzle
 
-# Full mipmap chain (all formats)
+# Full mipmap chain (non-indexed formats)
 python3 src/py/ps2_tim2_tool.py image.png --format 32bit --mipmaps
+
+# Select the indexed CLUT storage mode and CLUT entry format
+python3 src/py/ps2_tim2_tool.py image.png --format 8bit --csm2
+python3 src/py/ps2_tim2_tool.py image.png --format 4bit --clut-format 16
 
 # Combine options
 python3 src/py/ps2_tim2_tool.py image.png --format 32bit --swizzle --mipmaps --resize up
@@ -202,7 +216,9 @@ python3 src/py/ps2_tim2_tool.py --list-formats
 | `--dither` | Enable Floyd–Steinberg dithering (4-bit and 8-bit) |
 | `--resize up` \| `down` | Resize non-power-of-2 images up or down to the nearest power of 2 |
 | `--swizzle` | Apply GS VRAM swizzle to pixel data (32-bit and 16-bit only) |
-| `--mipmaps` | Generate a full mipmap chain stored in the TIM2 file (all formats) |
+| `--mipmaps` | Generate a full mipmap chain stored in the TIM2 file (non-indexed formats; indexed mipmaps are not supported) |
+| `--csm2` | Store indexed CLUT data sequentially using CSM2 instead of the default CSM1 layout |
+| `--clut-format FMT` | CLUT entry format: `16`, `16s`, `24`, or `32` (default: `32`) |
 | `--info` | Read and display info from an existing `.tm2` file |
 | `--verify` | Verify the integrity of a `.tm2` file (12 checks) |
 | `--extract EXT` | Extract TIM2 to an image format |
@@ -258,11 +274,20 @@ Each file gets a final verdict:
 
 Comparing two folders also reports any files present in one folder but missing from the other, plus a summary count of SAFE / WARNING / UNSAFE results across all compared files.
 
+## GS format and CLUT notes
+
+- `16s` selects the alternate `PSMCT16S` layout; it is not the same as the standard `16bit` (`PSMCT16`) output.
+- `8h`, `4hl`, and `4hh` write indexed pixels into the corresponding high-byte/high-nibble lanes of a 32-bit GS word. These are specialized GS storage formats, not ordinary standalone 8-bit or 4-bit textures.
+- `--csm2` selects CSM2 sequential CLUT storage for indexed textures. The default is CSM1; 8-bit CSM1 palette data is swizzled as required by the GS layout.
+- `--clut-format` selects the color format used by CLUT entries independently of the indexed pixel format.
+
 ## Notes
 
 - Non-power-of-2 images are still converted by default, with a warning. Use `--resize up` or `--resize down` to force power-of-2 dimensions.
 - `--swizzle` applies only to `32bit` and `16bit` formats.
-- `--mipmaps` applies to all five formats.
+- `--mipmaps` is supported for non-indexed formats. Indexed mipmap chains are not supported yet.
+- `--csm2` applies to indexed formats and selects sequential CSM2 CLUT storage; without it, the tool uses CSM1 storage.
+- `--clut-format` controls the palette entry format for indexed output: `16`, `16s`, `24`, or `32`.
 - `--dither` applies only to `4bit` and `8bit` formats.
 - The `24bit` format stores no alpha channel, so every pixel is fully opaque and `--no-premult` and `--swizzle` have no effect on it.
 - When extracting a TIM2 file to a format without alpha support (`.jpg`, `.bmp`, `.ppm`), transparency is composited onto a white background.

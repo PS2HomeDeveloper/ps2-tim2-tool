@@ -1,29 +1,8 @@
 #!/usr/bin/env python3
-"""
-╔══════════════════════════════════════════════════════════════════════╗
-║            PS2 TIM2 Converter  —  ps2_tim2_tool.py                   ║
-║   Convert any image (PNG, JPG, BMP, TGA, WebP …) → TIM2 (.tm2)     ║
-║   Formats : 4-bit | 8-bit | 16-bit | 24-bit | 32-bit               ║
-╚══════════════════════════════════════════════════════════════════════╝
+"""PlayStation 2 TIM2 texture converter and inspection utility.
 
-Usage:
-  {PROG} <image(s)> --format <fmt> [options]
-  {PROG} <file.tm2> --info
-  {PROG} <file.tm2> --verify
-  {PROG} --list convert.txt
-
-Examples:
-  {PROG} hero.png    --format 32bit
-  {PROG} bg.jpg      --format 16bit
-  {PROG} sprite.bmp  --format 8bit  --dither
-  {PROG} icon.tga    --format 4bit
-  {PROG} *.png *.jpg --format 32bit
-  {PROG} tex.png     --format 32bit --no-premult
-  {PROG} img.png     --format 8bit  --output out.tm2
-  {PROG} font1.tm2   --info
-  {PROG} --list textures.txt
-  {PROG} font1.tm2   --extract png
-  {PROG}             --list-formats
+Convert common image formats to TIM2, inspect and verify existing files,
+extract textures, and compare original and modified assets.
 """
 
 import argparse
@@ -87,10 +66,11 @@ PROG = _prog_name()
 #  │  .ico   — Windows Icon                    (largest frame used)     │
 #  │  .dds   — DirectDraw Surface              (direct textures)        │
 #  └─────────────────────────────────────────────────────────────────────┘
-SUPPORTED_EXTENSIONS = {
-    '.png', '.jpg', '.jpeg', '.bmp', '.tga', '.tiff', '.tif',
-    '.webp', '.gif', '.ppm', '.pgm', '.pbm', '.ico', '.dds',
-}
+# Use Pillow's registered image decoders rather than maintaining a stale short list.
+# Actual support still depends on the codecs compiled into the installed Pillow.
+_NON_IMAGE_EXTENSIONS = {'.pdf', '.ps', '.eps', '.h5', '.hdf', '.fit', '.fits',
+                         '.bufr', '.grib', '.mpeg', '.mpg', '.flc', '.fli'}
+SUPPORTED_EXTENSIONS = {ext.lower() for ext in Image.registered_extensions()} - _NON_IMAGE_EXTENSIONS
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -105,19 +85,25 @@ TIM2_ALIGN   = 128          # every Picture Block is aligned to 128 bytes
 IMG_RGBA32        = 0x00    # 32-bit full RGBA
 IMG_RGBA16        = 0x01    # 16-bit RGBA5551
 IMG_RGB24         = 0x02    # 24-bit RGB (no Alpha)
-IMG_INDEXED8      = 0x05    # 8-bit Indexed
-IMG_INDEXED4      = 0x06    # 4-bit Indexed (standard)
-IMG_INDEXED4_SONY = 0x03    # 4-bit Indexed (Sony variant — e.g. Dark Cloud)
+IMG_INDEXED4_SONY = 0x03    # Sony 4-bit indexed variant
+IMG_INDEXED4      = 0x04    # Standard 4-bit indexed
+IMG_INDEXED8      = 0x05    # 8-bit indexed
 
 # ─── CLUT Type  (byte 17 in the Picture Block Header) ─────────────────────────
 CLUT_NONE   = 0x00          # no CLUT  (32-bit and 16-bit)
-CLUT_RGBA32 = 0x02          # CLUT in RGBA32 format
+CLUT_RGB32  = 0x02          # CLUT in 32-bit RGB (unused high byte)
+CLUT_RGBA32 = 0x03          # CLUT in 32-bit RGBA
 
 # ─── GS Pixel Storage Modes  (from the official GS spec) ─────────────────────
-GS_PSM_CT32 = 0x00          # 32-bit RGBA8888
-GS_PSM_CT16 = 0x02          # 16-bit RGBA5551
-GS_PSM_T8   = 0x13          # 8-bit indexed
-GS_PSM_T4   = 0x14          # 4-bit indexed
+GS_PSM_CT32  = 0x00         # 32-bit RGBA8888
+GS_PSM_CT24  = 0x01         # 24-bit RGB (32-bit local-memory word)
+GS_PSM_CT16  = 0x02         # 16-bit RGBA5551
+GS_PSM_CT16S = 0x0A         # 16-bit signed/swizzled variant
+GS_PSM_T8    = 0x13         # 8-bit indexed
+GS_PSM_T4    = 0x14         # 4-bit indexed
+GS_PSM_T4HL  = 0x1A         # 4-bit indexed in high/low byte lane
+GS_PSM_T8H   = 0x1B         # 8-bit indexed in high byte lane
+GS_PSM_T4HH  = 0x2C         # 4-bit indexed in high/high byte lane
 
 # ─── GS CLUT Pixel Storage Mode ──────────────────────────────────────────────
 GS_CPSM_CT32 = 0x00         # CLUT in 32-bit format (default)
@@ -261,15 +247,17 @@ _IMG_TYPE_NAME = {
     0x00: '32-bit RGBA8888',
     0x01: '16-bit RGBA5551',
     0x02: '24-bit RGB888 (no Alpha)',
-    0x05: '8-bit  Indexed (256 colors)',
-    0x06: '4-bit  Indexed (16  colors)',
+    0x03: '4-bit Indexed (Sony variant)',
+    0x04: '4-bit Indexed (16 colors)',
+    0x05: '8-bit Indexed (256 colors)',
 }
 
 # ─── CLUT Type → readable name table ──────────────────────────────────────────
 _CLUT_TYPE_NAME = {
     0x00: 'none',
     0x01: 'RGBA5551',
-    0x02: 'RGBA8888',
+    0x02: 'RGB888 (32-bit CLUT slot)',
+    0x03: 'RGBA8888',
 }
 
 def tim2_info(path: Path) -> None:
@@ -302,9 +290,10 @@ def tim2_info(path: Path) -> None:
     img_size     = struct.unpack_from('<I', data, off +  8)[0]
     hdr_size     = struct.unpack_from('<H', data, off + 12)[0]
     clut_colors  = struct.unpack_from('<H', data, off + 14)[0]
-    mipmap_count = data[off + 16]
-    clut_type    = data[off + 17]
-    img_type     = data[off + 18]
+    picture_format = data[off + 16]
+    mipmap_count = data[off + 17]
+    clut_type    = data[off + 18]
+    img_type     = data[off + 19]
     width        = struct.unpack_from('<H', data, off + 20)[0]
     height       = struct.unpack_from('<H', data, off + 22)[0]
     gs_tex0      = struct.unpack_from('<Q', data, off + 24)[0]
@@ -338,6 +327,7 @@ def tim2_info(path: Path) -> None:
 {sep}
   TIM2 version:  0x{version:02X}
   Pictures    :  {num_pics}
+  Picture fmt :  {picture_format} (0=uncompressed)
   Mipmaps     :  {mipmap_count}
 {sep}
   Format      :  {fmt_name}
@@ -353,7 +343,7 @@ def tim2_info(path: Path) -> None:
   GsTex0      :  0x{gs_tex0:016X}
     TBP0      :  0x{tbp0:04X}  (Texture Base Pointer)
     TBW       :  {tbw}         (Buffer width in 64px units)
-    PSM       :  0x{psm:02X}     (Pixel Storage Mode)
+    PSM       :  0x{psm:02X}     ({ {0:'PSMCT32',1:'PSMCT24',2:'PSMCT16',10:'PSMCT16S',19:'PSMT8',20:'PSMT4',27:'PSMT8H',26:'PSMT4HL',44:'PSMT4HH'}.get(psm, 'unknown') })
     TW        :  {tw}          (log2 width)
     TH        :  {th}          (log2 height)
     TCC       :  {tcc}          (alpha: 1=enabled)
@@ -506,7 +496,7 @@ def resize_to_power_of_2(img: Image.Image, mode: str) -> Image.Image:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def compute_gs_tex0(width: int, height: int, psm: int,
-                    cpsm: int = GS_CPSM_CT32, cbp: int = 0) -> int:
+                    cpsm: int = GS_CPSM_CT32, cbp: int = 0, csm: int = 0, tcc: int = 1) -> int:
     """
     Builds the full (64-bit) GsTex0 register value per the GS spec.
     ┌──────────────────────────────────────────────────────────────┐
@@ -529,10 +519,15 @@ def compute_gs_tex0(width: int, height: int, psm: int,
     """
     # ─── TBW: Buffer width based on PSM ─────────────────────────────────────
     tbw_map = {
-        GS_PSM_CT32: align_up(width,  64) // 64,
-        GS_PSM_CT16: align_up(width,  64) // 64,
-        GS_PSM_T8:   align_up(width, 128) // 64,
-        GS_PSM_T4:   align_up(width, 256) // 64,
+        GS_PSM_CT32: align_up(width, 64) // 64,
+        GS_PSM_CT24: align_up(width, 64) // 64,
+        GS_PSM_CT16: align_up(width, 64) // 64,
+        GS_PSM_CT16S: align_up(width, 64) // 64,
+        GS_PSM_T8: align_up(width, 128) // 64,
+        GS_PSM_T4: align_up(width, 256) // 64,
+        GS_PSM_T8H: align_up(width, 64) // 64,
+        GS_PSM_T4HL: align_up(width, 64) // 64,
+        GS_PSM_T4HH: align_up(width, 64) // 64,
     }
     tbw = max(1, tbw_map.get(psm, align_up(width, 64) // 64))
 
@@ -546,11 +541,11 @@ def compute_gs_tex0(width: int, height: int, psm: int,
     v |= (psm  & 0x3F)   << 20   # PSM
     v |= (tw   & 0xF)    << 26   # TW
     v |= (th   & 0xF)    << 30   # TH
-    v |= (1    & 0x1)    << 34   # TCC   = 1  (Alpha enabled)
+    v |= (tcc  & 0x1)    << 34   # TCC   = 1 (RGBA), 0 (RGB)
     v |= (0    & 0x3)    << 35   # TFX   = MODULATE
     v |= (cbp  & 0x3FFF) << 37   # CBP   = 0
     v |= (cpsm & 0xF)    << 51   # CPSM
-    v |= (0    & 0x1)    << 55   # CSM   = CSM1
+    v |= (csm  & 0x1)    << 55   # CSM   = 0 CSM1, 1 CSM2
     v |= (0    & 0x1F)   << 56   # CSA   = 0
     v |= (1    & 0x7)    << 61   # CLD   = 1
     return v & 0xFFFFFFFFFFFFFFFF
@@ -895,14 +890,14 @@ def build_picture_block(pixel_data: bytes, clut_data: bytes,
                         clut_type: int, clut_colors: int,
                         psm: int,    cpsm: int,
                         use_swizzle: bool = False,
-                        mip_levels: list = None) -> bytes:
+                        mip_levels: list = None, csm: int = 0, tcc: int = 1) -> bytes:
     """
     Builds a TIM2 Picture Block (Header + data + padding).
     ┌──────────────────────────────────────────────────────────────┐
     │  TIM2 Picture Block Header  =  48 bytes                      │
     │  ──────────────────────────────────────────────────────────  │
     │  Offset  Size  Field                                         │
-    │   0       4B   Total Block Size  (aligned to 128 bytes)      │
+    │   0       4B   Total Block Size  (header + image + CLUT payload)      │
     │   4       4B   CLUT Data Size                                │
     │   8       4B   Image Data Size                               │
     │  12       2B   Header Size  =  48                            │
@@ -929,15 +924,15 @@ def build_picture_block(pixel_data: bytes, clut_data: bytes,
     mip_data      = b''
     mipmap_count  = 1
     if mip_levels:
-        mipmap_count = len(mip_levels)
+        mipmap_count = 1 + len(mip_levels)
         mip_data     = b''.join(mip_levels)
 
     HEADER     = 48
     raw_size   = HEADER + len(pixel_data) + len(mip_data) + len(clut_data)
-    total_size = align_up(raw_size, TIM2_ALIGN)
-    padding    = total_size - raw_size
+    total_size = raw_size
+    padding    = 0
 
-    gs_tex0    = compute_gs_tex0(width, height, psm, cpsm)
+    gs_tex0    = compute_gs_tex0(width, height, psm, cpsm, csm=csm, tcc=tcc)
     gs_texclut = compute_gs_texclut(cbw=1) if clut_colors > 0 else 0
 
     hdr = bytearray(HEADER)
@@ -946,10 +941,10 @@ def build_picture_block(pixel_data: bytes, clut_data: bytes,
     struct.pack_into('<I', hdr,  8, len(pixel_data) + len(mip_data))
     struct.pack_into('<H', hdr, 12, HEADER)
     struct.pack_into('<H', hdr, 14, clut_colors)
-    hdr[16] = mipmap_count
-    hdr[17] = clut_type
-    hdr[18] = img_type
-    hdr[19] = 0            # reserved
+    hdr[16] = 0            # picture format: 0 = uncompressed
+    hdr[17] = mipmap_count
+    hdr[18] = clut_type
+    hdr[19] = img_type
     struct.pack_into('<H', hdr, 20, width)
     struct.pack_into('<H', hdr, 22, height)
     struct.pack_into('<Q', hdr, 24, gs_tex0)
@@ -1040,7 +1035,7 @@ def convert_32bit(img: Image.Image, premult: bool = True,
 def convert_16bit(img: Image.Image, premult: bool = True,
                   use_dither: bool = False,
                   use_swizzle: bool = False, use_mipmaps: bool = False,
-                  **_) -> bytes:
+                  psm: int = GS_PSM_CT16, **_) -> bytes:
     """
     16-bit RGBA5551  —  high quality, half the size of 32-bit.
     ┌──────────────────────────────────────────────────────────┐
@@ -1086,13 +1081,50 @@ def convert_16bit(img: Image.Image, premult: bool = True,
     return build_picture_block(
         bytes(data), b'', w, h,
         16, IMG_RGBA16, CLUT_NONE, 0,
-        GS_PSM_CT16, GS_CPSM_CT32,
+        psm, GS_CPSM_CT32,
         use_swizzle=use_swizzle, mip_levels=mip_levels)
+
+
+def _encode_clut(colors, clut_format: str) -> tuple[bytes, int, int, int]:
+    """Return CLUT bytes, TIM2 color type, GS CPSM and TCC."""
+    if clut_format not in {'16', '16s', '24', '32'}:
+        raise ValueError('CLUT format must be one of: 16, 16s, 24, 32')
+    out = bytearray()
+    if clut_format in {'16', '16s'}:
+        for r, g, b, a in colors:
+            out += struct.pack('<H', rgba_to_16bit(r, g, b, a))
+        return bytes(out), 0x01, (0x0A if clut_format == '16s' else 0x02), 1
+    if clut_format == '24':
+        for r, g, b, _a in colors:
+            out += bytes((r, g, b, 0))
+        return bytes(out), 0x02, 0x01, 0
+    for r, g, b, a in colors:
+        out += bytes((r, g, b, ps2_alpha(a)))
+    return bytes(out), 0x03, 0x00, 1
+
+
+def _pack_high_index(indices, psm: int) -> bytes:
+    """Pack PSMT8H/PSMT4HL/PSMT4HH indices into 32-bit GS words.
+
+    These PSMs address the high byte lane of a 32-bit word; they therefore
+    consume four bytes per texel in local memory, unlike ordinary T8/T4.
+    """
+    out = bytearray(len(indices) * 4)
+    for i, index in enumerate(indices):
+        if psm == GS_PSM_T8H:
+            out[i * 4 + 3] = int(index) & 0xFF
+        elif psm == GS_PSM_T4HL:
+            out[i * 4 + 3] = int(index) & 0x0F
+        elif psm == GS_PSM_T4HH:
+            out[i * 4 + 3] = (int(index) & 0x0F) << 4
+        else:
+            raise ValueError(f"Unsupported high-lane indexed PSM: {psm}")
+    return bytes(out)
 
 
 def convert_8bit(img: Image.Image, premult: bool = False,
                  use_dither: bool = False, use_mipmaps: bool = False,
-                 **_) -> bytes:
+                 psm: int = GS_PSM_T8, csm: int = 0, clut_format: str = '32', **_) -> bytes:
     """
     8-bit Indexed  —  256 colors with a CLUT.
     ┌──────────────────────────────────────────────────────────┐
@@ -1116,11 +1148,10 @@ def convert_8bit(img: Image.Image, premult: bool = False,
     # ─── Build the CLUT then apply Swizzle ────────────────────────────────────
     clut_raw = [(palette[i*3], palette[i*3+1], palette[i*3+2], avg_alpha[i])
                 for i in range(256)]
-    clut_raw  = clut8_swizzle(clut_raw)
+    if csm == 0:
+        clut_raw = clut8_swizzle(clut_raw)
 
-    clut_data = bytearray()
-    for r, g, b, a in clut_raw:
-        clut_data += bytes([r, g, b, ps2_alpha(a)])
+    clut_bytes, clut_type, cpsm, tcc = _encode_clut(clut_raw, clut_format)
 
     # ─── Generate mipmap levels for 8-bit ─────────────────────────────────────
     # We downscale the original RGBA image, then re-quantize each level
@@ -1131,18 +1162,24 @@ def convert_8bit(img: Image.Image, premult: bool = False,
         mip_levels = []
         for mip in mip_imgs:
             mip_q = quantize_best(mip.convert('RGBA'), 256, use_dither)
-            mip_levels.append(mip_q.tobytes())
+            mip_idx = mip_q.tobytes()
+            if psm == GS_PSM_T8H:
+                mip_idx = _pack_high_index(mip_idx, psm)
+            mip_levels.append(mip_idx)
 
+    index_bytes = img_q.tobytes()
+    if psm == GS_PSM_T8H:
+        index_bytes = _pack_high_index(index_bytes, psm)
     return build_picture_block(
-        img_q.tobytes(), bytes(clut_data), w, h,
-        8, IMG_INDEXED8, CLUT_RGBA32, 256,
-        GS_PSM_T8, GS_CPSM_CT32,
-        use_swizzle=False, mip_levels=mip_levels)
+        index_bytes, clut_bytes, w, h,
+        8, IMG_INDEXED8, clut_type, 256,
+        psm, cpsm,
+        use_swizzle=False, mip_levels=mip_levels, csm=csm, tcc=tcc)
 
 
 def convert_4bit(img: Image.Image, premult: bool = False,
                  use_dither: bool = False, use_mipmaps: bool = False,
-                 **_) -> bytes:
+                 psm: int = GS_PSM_T4, csm: int = 0, clut_format: str = '32', **_) -> bytes:
     """
     4-bit Indexed  —  16 colors, smallest size.
     ┌──────────────────────────────────────────────────────────┐
@@ -1161,12 +1198,9 @@ def convert_4bit(img: Image.Image, premult: bool = False,
     avg_alpha = extract_alpha_per_index(img_rgba, img_q, 16)
 
     # ─── Build the CLUT (16 colors, no Swizzle needed) ────────────────────────
-    clut_data = bytearray()
-    for i in range(16):
-        r = palette[i*3]
-        g = palette[i*3+1]
-        b = palette[i*3+2]
-        clut_data += bytes([r, g, b, ps2_alpha(avg_alpha[i])])
+    clut_colors = [(palette[i * 3], palette[i * 3 + 1], palette[i * 3 + 2], avg_alpha[i])
+                   for i in range(16)]
+    clut_bytes, clut_type, cpsm, tcc = _encode_clut(clut_colors, clut_format)
 
     def _pack_nibbles(img_indexed: Image.Image) -> bytes:
         """Nibble packing: two pixels per byte."""
@@ -1179,6 +1213,8 @@ def convert_4bit(img: Image.Image, premult: bool = False,
         return bytes(out)
 
     pixel_data = _pack_nibbles(img_q)
+    if psm in (GS_PSM_T4HL, GS_PSM_T4HH):
+        pixel_data = _pack_high_index(img_q.getdata(), psm)
 
     # ─── Generate mipmap levels for 4-bit ─────────────────────────────────────
     mip_levels = None
@@ -1187,13 +1223,16 @@ def convert_4bit(img: Image.Image, premult: bool = False,
         mip_levels = []
         for mip in mip_imgs:
             mip_q = quantize_best(mip.convert('RGBA'), 16, use_dither)
-            mip_levels.append(_pack_nibbles(mip_q))
+            mip_idx = _pack_nibbles(mip_q)
+            if psm in (GS_PSM_T4HL, GS_PSM_T4HH):
+                mip_idx = _pack_high_index(mip_q.getdata(), psm)
+            mip_levels.append(mip_idx)
 
     return build_picture_block(
-        pixel_data, bytes(clut_data), w, h,
-        4, IMG_INDEXED4, CLUT_RGBA32, 16,
-        GS_PSM_T4, GS_CPSM_CT32,
-        use_swizzle=False, mip_levels=mip_levels)
+        pixel_data, clut_bytes, w, h,
+        4, IMG_INDEXED4, clut_type, 16,
+        psm, cpsm,
+        use_swizzle=False, mip_levels=mip_levels, csm=csm, tcc=tcc)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1214,7 +1253,8 @@ def _read_tm2_header(path: Path) -> dict:
     clut_size   = struct.unpack_from('<I', data, off +  4)[0]
     img_size    = struct.unpack_from('<I', data, off +  8)[0]
     clut_colors = struct.unpack_from('<H', data, off + 14)[0]
-    img_type    = data[off + 18]
+    img_type    = data[off + 19]
+    gs_tex0     = struct.unpack_from('<Q', data, off + 24)[0]
     width       = struct.unpack_from('<H', data, off + 20)[0]
     height      = struct.unpack_from('<H', data, off + 22)[0]
 
@@ -1223,8 +1263,11 @@ def _read_tm2_header(path: Path) -> dict:
 
     return {
         'path'       : path,
+        'clut_type'  : data[off + 18],
         'file_size'  : len(data),
         'img_type'   : img_type,
+        'psm'        : (gs_tex0 >> 20) & 0x3F,
+        'csm'        : (gs_tex0 >> 55) & 1,
         'width'      : width,
         'height'     : height,
         'img_size'   : img_size,
@@ -1268,7 +1311,11 @@ def _has_transparency(h: dict) -> bool:
     elif img_type in (IMG_INDEXED8, IMG_INDEXED4, IMG_INDEXED4_SONY):
         clut_colors = h['clut_colors']
         bytes_per   = clut_size // max(clut_colors, 1) if clut_colors > 0 else 4
-        if bytes_per == 4:
+        if bytes_per == 2:
+            for i in range(0, len(clut) - 1, 2):
+                if (struct.unpack_from('<H', clut, i)[0] & 0x8000) == 0:
+                    return True
+        elif bytes_per >= 4 and h.get('clut_type') == CLUT_RGBA32:
             for i in range(3, len(clut), 4):
                 if clut[i] < 0x80:
                     return True
@@ -1509,40 +1556,59 @@ def diff_folders(orig_dir: Path, mod_dir: Path) -> None:
 #  Format table
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _composite_over_white(img: Image.Image) -> Image.Image:
+    """
+    Flatten RGBA onto white using the same integer formula as the native C
+    converter. PSMCT24 has no alpha channel, so transparency must be resolved
+    before RGB data is written.
+    """
+    rgba = img.convert('RGBA')
+    white = Image.new('RGBA', rgba.size, (255, 255, 255, 255))
+    return Image.alpha_composite(white, rgba).convert('RGB')
+
+
 def convert_24bit(img: Image.Image, premult: bool = False,
                   use_swizzle: bool = False, use_mipmaps: bool = False,
                   **_) -> bytes:
     """
-    24-bit RGB888  —  full color, no Alpha channel.
-    ┌──────────────────────────────────────────────────────────┐
-    │  Best for: backgrounds and textures with no transparency │
-    │  3 bytes per pixel: R G B                                │
-    │  Alpha is not stored — all pixels are fully opaque       │
-    └──────────────────────────────────────────────────────────┘
+    24-bit RGB888 — full color, no Alpha channel.
+    Transparent source pixels are composited over white to match the native
+    C converter and avoid losing transparency as black RGB pixels.
     """
-    img = img.convert('RGB')
-    w, h = img.size
-    raw  = img.tobytes()
+    rgba = img.convert('RGBA')
+    w, h = rgba.size
+    raw = _composite_over_white(rgba).tobytes()
 
-    # ─── Generate Mipmap levels ───────────────────────────────────────────────
+    # Generate mipmaps from the original RGBA image, then flatten each level.
     mip_levels = None
     if use_mipmaps:
-        mip_imgs   = generate_mipmaps(img)[1:]
-        mip_levels = [mip.convert('RGB').tobytes() for mip in mip_imgs]
+        mip_imgs = generate_mipmaps(rgba)[1:]
+        mip_levels = [_composite_over_white(mip).tobytes()
+                      for mip in mip_imgs]
 
     return build_picture_block(
         raw, b'', w, h,
         24, IMG_RGB24, CLUT_NONE, 0,
-        GS_PSM_CT32, GS_CPSM_CT32,
-        use_swizzle=False, mip_levels=mip_levels)
+        GS_PSM_CT24, GS_CPSM_CT32,
+        use_swizzle=False, mip_levels=mip_levels, tcc=0)
 
+
+FORMAT_ALIASES = {
+    'psmct32': '32bit', 'psmct24': '24bit', 'psmct16': '16bit',
+    'psmct16s': '16s', 'psmt8': '8bit', 'psmt4': '4bit',
+    'psmt8h': '8h', 'psmt4hl': '4hl', 'psmt4hh': '4hh',
+}
 
 FORMATS = {
-    '32bit': (convert_32bit, 'RGBA8888  | full color + 8-bit alpha  | best for textures'),
-    '24bit': (convert_24bit, 'RGB888    | full color, no alpha       | backgrounds'),
-    '16bit': (convert_16bit, 'RGBA5551  | 32K colors + 1-bit alpha  | smaller size'),
-    '8bit':  (convert_8bit,  'Indexed8  | 256 colors + CLUT         | characters, environments'),
-    '4bit':  (convert_4bit,  'Indexed4  | 16  colors + CLUT         | icons, UI elements'),
+    '32bit': (convert_32bit, 'PSMCT32  | RGBA8888'),
+    '24bit': (convert_24bit, 'PSMCT24  | RGB888'),
+    '16bit': (convert_16bit, 'PSMCT16  | RGBA5551'),
+    '16s':   (lambda img, **kw: convert_16bit(img, psm=GS_PSM_CT16S, **kw), 'PSMCT16S | RGBA5551 signed layout'),
+    '8bit':  (convert_8bit, 'PSMT8    | 256-color indexed'),
+    '4bit':  (convert_4bit, 'PSMT4    | 16-color indexed'),
+    '8h':    (lambda img, **kw: convert_8bit(img, psm=GS_PSM_T8H, **kw), 'PSMT8H   | indexed high-byte lane'),
+    '4hl':   (lambda img, **kw: convert_4bit(img, psm=GS_PSM_T4HL, **kw), 'PSMT4HL  | indexed high/low nibble lane'),
+    '4hh':   (lambda img, **kw: convert_4bit(img, psm=GS_PSM_T4HH, **kw), 'PSMT4HH  | indexed high/high nibble lane'),
 }
 
 
@@ -1637,9 +1703,11 @@ def verify_tm2(path: Path) -> bool:
     img_size    = struct.unpack_from('<I', data, off +  8)[0]
     hdr_size    = struct.unpack_from('<H', data, off + 12)[0]
     clut_colors = struct.unpack_from('<H', data, off + 14)[0]
-    mip_count   = data[off + 16]
-    clut_type   = data[off + 17]
-    img_type    = data[off + 18]
+    picture_format = data[off + 16]
+    mip_count   = data[off + 17]
+    clut_type   = data[off + 18]
+    img_type    = data[off + 19]
+    gs_tex0     = struct.unpack_from('<Q', data, off + 24)[0]
     width       = struct.unpack_from('<H', data, off + 20)[0]
     height      = struct.unpack_from('<H', data, off + 22)[0]
     gs_tex0     = struct.unpack_from('<Q', data, off + 24)[0]
@@ -1652,6 +1720,12 @@ def verify_tm2(path: Path) -> bool:
     # ─── 5. Image Type ───────────────────────────────────────────────────────
     valid_types = {IMG_RGBA32, IMG_RGBA16, IMG_RGB24, IMG_INDEXED8, IMG_INDEXED4, IMG_INDEXED4_SONY}
     type_name   = _IMG_TYPE_NAME.get(img_type, f"Unknown (0x{img_type:02X})")
+    chk(picture_format == 0,
+        'Picture format OK (uncompressed)',
+        f'Unsupported picture format ({picture_format})')
+    chk(mip_count >= 1,
+        f'Mipmap count OK ({mip_count})',
+        'Invalid zero mipmap count')
     chk(img_type in valid_types,
         f"Image Type OK  ({type_name})",
         f"Unknown Image Type  (0x{img_type:02X})")
@@ -1676,29 +1750,49 @@ def verify_tm2(path: Path) -> bool:
         f"File appears truncated  (expected {expected_file_size} bytes, got {file_size})")
 
     # ─── 9. Block Size aligned to 128 ────────────────────────────────────────
-    chk(block_total % 128 == 0,
-        f"Block alignment OK  ({block_total} bytes, aligned to 128)",
-        f"Block size not aligned to 128  ({block_total} bytes)")
+    chk(block_total >= hdr_size + img_size + clut_size,
+        f"Picture block size OK ({block_total} bytes)",
+        f"Picture block smaller than declared payload ({block_total} bytes)")
 
     # ─── 10. Image Data + CLUT + Header size = Block Total ────────────────────
     computed = hdr_size + img_size + clut_size
-    expected_aligned = align_up(computed, 128)
-    chk(block_total == expected_aligned,
-        f"Block size consistent  (header+img+clut={computed}, aligned={block_total})",
-        f"Block size mismatch  (computed {expected_aligned}, stored {block_total})")
+    chk(block_total == computed,
+        f"Block size consistent (header+image+CLUT={computed})",
+        f"Block size mismatch (computed {computed}, stored {block_total})")
 
     # ─── 11. CLUT colors according to Image Type ─────────────────────────────
     expected_clut = {
-        IMG_RGBA32:   0,
-        IMG_RGBA16:   0,
-        IMG_INDEXED8: 256,
-        IMG_INDEXED4: 16,
+        IMG_RGBA32: 0, IMG_RGBA16: 0, IMG_RGB24: 0,
+        IMG_INDEXED8: 256, IMG_INDEXED4: 16, IMG_INDEXED4_SONY: 16,
     }
     exp_colors = expected_clut.get(img_type, -1)
     if exp_colors != -1:
-        chk(clut_colors == exp_colors,
+        chk(clut_colors >= exp_colors,
             f"CLUT colors OK  ({clut_colors})",
-            f"CLUT colors mismatch  (got {clut_colors}, expected {exp_colors} for {type_name})")
+            f"CLUT color count too small (got {clut_colors}, minimum {exp_colors} for {type_name})")
+
+    if exp_colors > 0:
+        entry_bytes = 2 if clut_type == 0x01 else 4
+        minimum_clut_bytes = exp_colors * entry_bytes
+        chk(clut_size >= minimum_clut_bytes,
+            f'CLUT payload size OK ({clut_size} bytes)',
+            f'CLUT payload too small ({clut_size}, need at least {minimum_clut_bytes})')
+
+    psm = (gs_tex0 >> 20) & 0x3F
+    pixel_count = width * height
+    expected_image_bytes = {
+        0: pixel_count * 4, 1: pixel_count * 3,
+        2: pixel_count * 2, 10: pixel_count * 2,
+        19: pixel_count, 20: (pixel_count + 1) // 2,
+        27: pixel_count * 4, 26: pixel_count * 4, 44: pixel_count * 4,
+    }.get(psm)
+    chk(expected_image_bytes is not None,
+        f'GS PSM recognized (0x{psm:02X})',
+        f'Unsupported GS PSM (0x{psm:02X})')
+    if expected_image_bytes is not None:
+        chk(img_size >= expected_image_bytes,
+            f'Image payload size OK ({img_size} bytes)',
+            f'Image payload too small ({img_size}, need at least {expected_image_bytes})')
 
     # ─── 12. GsTex0: TW and TH are consistent ────────────────────────────────
     tw = (gs_tex0 >> 26) & 0xF
@@ -1849,7 +1943,8 @@ def extract_tm2(src_path: Path, out_ext: str) -> str:
     hdr_size    = struct.unpack_from('<H', data, off + 12)[0]
     clut_colors = struct.unpack_from('<H', data, off + 14)[0]
     clut_type   = data[off + 17]
-    img_type    = data[off + 18]
+    img_type    = data[off + 19]
+    gs_tex0     = struct.unpack_from('<Q', data, off + 24)[0]
     width       = struct.unpack_from('<H', data, off + 20)[0]
     height      = struct.unpack_from('<H', data, off + 22)[0]
 
@@ -1901,37 +1996,54 @@ def extract_tm2(src_path: Path, out_ext: str) -> str:
         # ── 8-bit Indexed ─────────────────────────────────────────────────────
         # Read the CLUT (RGBA32 × 256 colors)
         raw_clut = []
-        for i in range(0, clut_colors * 4, 4):
-            r = clut_data[i]
-            g = clut_data[i+1]
-            b = clut_data[i+2]
-            a = _ps2_alpha_to_255(clut_data[i+3])
-            raw_clut.append((r, g, b, a))
+        entry_size = 2 if clut_type == CLUT_RGBA16 else 4
+        for i in range(clut_colors):
+            if entry_size == 2:
+                value = struct.unpack_from('<H', clut_data, i * 2)[0]
+                raw_clut.append(_16bit_to_rgba(value))
+            else:
+                r, g, b = clut_data[i * 4:i * 4 + 3]
+                a = 255 if clut_type == CLUT_RGB32 else _ps2_alpha_to_255(clut_data[i * 4 + 3])
+                raw_clut.append((r, g, b, a))
 
-        # ─── Reverse the Swizzle ─────────────────────────────────────────────
-        palette = _unswizzle_clut8(raw_clut)
+        psm = (struct.unpack_from('<Q', data, off + 24)[0] >> 20) & 0x3F
+        csm = (struct.unpack_from('<Q', data, off + 24)[0] >> 55) & 1
+        palette = _unswizzle_clut8(raw_clut) if csm == 0 else raw_clut
 
         # ─── Build the image from the indices ──────────────────────────────
-        pixels = [palette[idx] for idx in img_data[:width * height]]
+        psm = (struct.unpack_from('<Q', data, off + 24)[0] >> 20) & 0x3F
+        if psm == GS_PSM_T8H:
+            indices = [img_data[i * 4 + 3] for i in range(width * height)]
+        else:
+            indices = list(img_data[:width * height])
+        pixels = [palette[idx] for idx in indices]
         img = Image.new('RGBA', (width, height))
         img.putdata(pixels)
 
-    elif img_type == IMG_INDEXED4:
+    elif img_type in (IMG_INDEXED4, IMG_INDEXED4_SONY):
         # ── 4-bit Indexed ─────────────────────────────────────────────────────
         # Read the CLUT (RGBA32 × 16 colors)
         palette = []
-        for i in range(0, clut_colors * 4, 4):
-            r = clut_data[i]
-            g = clut_data[i+1]
-            b = clut_data[i+2]
-            a = _ps2_alpha_to_255(clut_data[i+3])
-            palette.append((r, g, b, a))
+        entry_size = 2 if clut_type == CLUT_RGBA16 else 4
+        for i in range(clut_colors):
+            if entry_size == 2:
+                value = struct.unpack_from('<H', clut_data, i * 2)[0]
+                palette.append(_16bit_to_rgba(value))
+            else:
+                r, g, b = clut_data[i * 4:i * 4 + 3]
+                a = 255 if clut_type == CLUT_RGB32 else _ps2_alpha_to_255(clut_data[i * 4 + 3])
+                palette.append((r, g, b, a))
 
         # ─── Decode Nibble packing ────────────────────────────────────────────
-        indices = []
-        for byte in img_data:
-            indices.append(byte & 0x0F)         # lo nibble = first pixel
-            indices.append((byte >> 4) & 0x0F)  # hi nibble = second pixel
+        psm = (struct.unpack_from('<Q', data, off + 24)[0] >> 20) & 0x3F
+        if psm in (GS_PSM_T4HL, GS_PSM_T4HH):
+            shift = 0 if psm == GS_PSM_T4HL else 4
+            indices = [(img_data[i * 4 + 3] >> shift) & 0x0F for i in range(width * height)]
+        else:
+            indices = []
+            for byte in img_data:
+                indices.append(byte & 0x0F)
+                indices.append((byte >> 4) & 0x0F)
 
         pixels = [palette[idx] for idx in indices[:width * height]]
         img = Image.new('RGBA', (width, height))
@@ -1959,13 +2071,6 @@ def extract_tm2(src_path: Path, out_ext: str) -> str:
 
     img.save(dst_path, **save_kwargs)
     return str(dst_path)
-
-BANNER = """\
-╔══════════════════════════════════════════════════════════════════════╗
-║            PS2 TIM2 Converter  —  ps2_tim2_tool.py                   ║
-║     Convert any image → TIM2 (.tm2) for PlayStation 2              ║
-║     GsTex0 accurate | Alpha Premult | MEDIANCUT | Dithering         ║
-╚══════════════════════════════════════════════════════════════════════╝"""
 
 SUPPORTED_EXT_STR = '  ' + ', '.join(sorted(SUPPORTED_EXTENSIONS))
 
@@ -2014,9 +2119,12 @@ def list_formats():
 def convert_one(src: str, fmt: str, dst: str = None,
                 premult: bool = True, dither: bool = False,
                 resize: str = None, swizzle: bool = False,
-                mipmaps: bool = False,
+                mipmaps: bool = False, csm2: bool = False, clut_format: str = '32',
                 output_dir: Path = None) -> str:
+    fmt = FORMAT_ALIASES.get(fmt.lower(), fmt.lower())
     fn, _ = FORMATS[fmt]
+    if mipmaps and fmt in {'4bit', '8bit', '4hl', '4hh', '8h'}:
+        raise ValueError('Mipmap generation is currently supported only for direct-color PSMCT formats; indexed mipmaps require a shared CLUT.')
     src_path = Path(src)
 
     if not src_path.exists():
@@ -2048,7 +2156,8 @@ def convert_one(src: str, fmt: str, dst: str = None,
             img = resize_to_power_of_2(img, resize)
         print(f"  Output:     {dst_path.name}", end=' ... ', flush=True)
 
-    block = fn(img, premult=premult, use_dither=dither, use_swizzle=swizzle, use_mipmaps=mipmaps)
+    block = fn(img, premult=premult, use_dither=dither, use_swizzle=swizzle,
+               use_mipmaps=mipmaps, csm=1 if csm2 else 0, clut_format=clut_format)
     data  = build_tim2_file([block])
     dst_path.write_bytes(data)
 
@@ -2057,11 +2166,8 @@ def convert_one(src: str, fmt: str, dst: str = None,
 
 
 def main():
-    print(BANNER)
-    print()
-
     parser = argparse.ArgumentParser(
-        description='Convert any image to TIM2 (.tm2) for PlayStation 2',
+        description='Convert images to PlayStation 2 TIM2 textures; inspect, verify, extract and compare TIM2 files.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -2081,8 +2187,8 @@ Examples:
     )
     parser.add_argument('images',          nargs='*',
                         help='Input image files (PNG, JPG, BMP, TGA, ...) or .tm2 with --info')
-    parser.add_argument('--format', '-f',  choices=list(FORMATS.keys()),
-                        help='Output format: 4bit | 8bit | 16bit | 24bit | 32bit')
+    parser.add_argument('--format', '-f',  choices=list(FORMATS.keys()) + list(FORMAT_ALIASES.keys()), type=str.lower,
+                        help='Output GS PSM: 32bit, 24bit, 16bit, 16s, 8bit, 4bit, 8h, 4hl, or 4hh')
     parser.add_argument('--output', '-o',  help='Output file path (single file only)')
     parser.add_argument('--output-dir',   metavar='DIR',
                         help='Output directory for all converted files')
@@ -2092,6 +2198,10 @@ Examples:
                         help='Enable Floyd-Steinberg Dithering (4bit and 8bit)')
     parser.add_argument('--resize',        choices=['up', 'down'],
                         help='Resize to power-of-2: up=scale up, down=scale down')
+    parser.add_argument('--clut-format', choices=['16', '16s', '24', '32'], type=str.lower, default='32',
+                        help='CLUT storage format: 16-bit RGBA, 16s, 24-bit RGB, or 32-bit RGBA')
+    parser.add_argument('--csm2', action='store_true',
+                        help='Store the CLUT sequentially (CSM2) instead of the default CSM1 layout')
     parser.add_argument('--swizzle',       action='store_true',
                         help='Apply GS VRAM Swizzle (32-bit and 16-bit only)')
     parser.add_argument('--mipmaps',       action='store_true',
@@ -2261,6 +2371,8 @@ Examples:
         resize     = args.resize
         swizzle    = args.swizzle
         mipmaps    = args.mipmaps
+        csm2       = args.csm2
+        clut_format = args.clut_format
         output_dir = None
         if args.output_dir:
             output_dir = Path(args.output_dir)
@@ -2270,7 +2382,7 @@ Examples:
         outputs  = []
         for lineno, filename, fmt in entries:
             try:
-                out = convert_one(filename, fmt, None, premult, dither, resize, swizzle, mipmaps, output_dir)
+                out = convert_one(filename, fmt, None, premult, dither, resize, swizzle, mipmaps, csm2, clut_format, output_dir)
                 outputs.append(out)
                 ok += 1
             except Exception as e:
@@ -2290,7 +2402,7 @@ Examples:
         return
 
     if not args.format:
-        print('ERROR: --format is required.  Choose: 4bit | 8bit | 16bit | 24bit | 32bit\n')
+        print('ERROR: --format is required. Choose one of the GS PSM formats shown below\n')
         list_formats()
         sys.exit(1)
 
@@ -2318,7 +2430,7 @@ Examples:
     outputs  = []
     for src in args.images:
         try:
-            out = convert_one(src, args.format, out_arg, premult, dither, resize, swizzle, mipmaps, output_dir)
+            out = convert_one(src, args.format, out_arg, premult, dither, resize, swizzle, mipmaps, args.csm2, args.clut_format, output_dir)
             outputs.append(out)
             ok += 1
         except Exception as e:

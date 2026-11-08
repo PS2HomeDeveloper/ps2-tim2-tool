@@ -1,9 +1,7 @@
 /*
- * ps2_tim2_tool.c - self-contained PS2 TIM2 image converter
- *
- * Reimplementation of ps2_tim2_tool.py using libpng, libjpeg, giflib,
- * libtiff and libwebp. BMP/TGA/PNM/ICO/DDS codecs are implemented here.
- * No external converter or child process is used.
+ * ps2_tim2_tool.c - native PlayStation 2 TIM2 command-line utility.
+ * Image decoding, palette generation, GS texture packing, TIM2 encoding,
+ * inspection, verification, extraction, and comparison run in-process.
  */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
@@ -1624,6 +1622,16 @@ static int build_median_palette(const Image *im, int requested, uint8_t palette[
                 break;
             }
         }
+        /*
+         * A single dominant histogram bin (often transparent/white background)
+         * can exceed half the box weight. Splitting immediately after that bin
+         * repeatedly leaves almost the entire color space in one final box.
+         * Fall back to a balanced split of distinct bins to preserve minority
+         * hues such as red and blue in indexed palettes.
+         */
+        if (split == old.begin + 1 && old.end - old.begin > 2)
+            split = old.begin + (old.end - old.begin) / 2;
+
         boxes[pick] = (ColorBox){old.begin, split, 0, 0, 0, 0, 0, 0, 0};
         boxes[nb] = (ColorBox){split, old.end, 0, 0, 0, 0, 0, 0, 0};
         box_measure(&boxes[pick], colors);
@@ -1718,8 +1726,7 @@ static uint8_t *map_palette(const Image *im, const uint8_t pal[256][3], int n, b
     return idx;
 }
 
-/* Direct 16-bit channel dithering, matching the serpentine diffusion geometry
-   of the Python implementation.  Output channels hold 5-bit values. */
+/* Serpentine Floyd-Steinberg dithering for direct 5-bit channel quantization. */
 static uint8_t *dither_direct_5bit(const Image *im) {
     int w = im->w;
     size_t np = (size_t)w * im->h;
@@ -1770,17 +1777,23 @@ static uint8_t *dither_direct_5bit(const Image *im) {
 #define IMG_RGBA16 0x01
 #define IMG_RGB24 0x02
 #define IMG_INDEXED8 0x05
-#define IMG_INDEXED4 0x06
+#define IMG_INDEXED4 0x04
 #define IMG_INDEXED4_SONY 0x03
 #define CLUT_NONE 0x00
 #define CLUT_RGBA16 0x01
-#define CLUT_RGBA32 0x02
+#define CLUT_RGB32 0x02
+#define CLUT_RGBA32 0x03
 #define GS_PSM_CT32 0x00
+#define GS_PSM_CT24 0x01
 #define GS_PSM_CT16 0x02
+#define GS_PSM_CT16S 0x0A
 #define GS_PSM_T8 0x13
 #define GS_PSM_T4 0x14
+#define GS_PSM_T4HL 0x24
+#define GS_PSM_T8H 0x1B
+#define GS_PSM_T4HH 0x2C
 #define GS_CPSM_CT32 0x00
-#define PS2_TOOL_VERSION "1.0.0"
+#define PS2_TOOL_VERSION "1.0.1"
 
 /* Growing binary byte buffer used by the TIM2 encoder. */
 typedef struct { uint8_t *p; size_t n, cap; } Buffer;
@@ -1798,9 +1811,6 @@ static void buf_reserve(Buffer *b, size_t add) {
 static void buf_put(Buffer *b, const void *p, size_t n) {
     buf_reserve(b, n); memcpy(b->p + b->n, p, n); b->n += n;
 }
-static void buf_zero(Buffer *b, size_t n) {
-    buf_reserve(b, n); memset(b->p + b->n, 0, n); b->n += n;
-}
 static void wr64(uint8_t *p, uint64_t v) {
     for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (i * 8));
 }
@@ -1814,7 +1824,7 @@ static unsigned ceil_log2_u(unsigned n) {
     return p;
 }
 static uint8_t ps2_alpha(unsigned a) {
-    /* Python round is nearest-even. Exact ties are impossible because 255 is odd. */
+    /* Round to the nearest representable PS2 alpha value. */
     return (uint8_t)((a * 128u + 127u) / 255u);
 }
 static uint8_t alpha_from_ps2(unsigned a) {
@@ -1834,7 +1844,7 @@ static void ps2_5551_to_rgba(uint16_t v, uint8_t out[4]) {
     out[2] = (uint8_t)((((v >> 10) & 31) * 255 + 15) / 31);
     out[3] = (v & 0x8000) ? 255 : 0;
 }
-static uint64_t compute_gs_tex0(int w, int h, int psm, int cpsm, int cbp) {
+static uint64_t compute_gs_tex0(int w, int h, int psm, int cpsm, int cbp, int csm, int tcc) {
     int unit = (psm == GS_PSM_T8) ? 128 : (psm == GS_PSM_T4) ? 256 : 64;
     int tbw = align_up(w, unit) / 64; if (tbw < 1) tbw = 1;
     uint64_t v = 0;
@@ -1842,9 +1852,10 @@ static uint64_t compute_gs_tex0(int w, int h, int psm, int cpsm, int cbp) {
     v |= ((uint64_t)psm & 0x3f) << 20;
     v |= ((uint64_t)ceil_log2_u((unsigned)(w > 0 ? w : 1)) & 0xf) << 26;
     v |= ((uint64_t)ceil_log2_u((unsigned)(h > 0 ? h : 1)) & 0xf) << 30;
-    v |= UINT64_C(1) << 34;
+    v |= ((uint64_t)tcc & 1) << 34;
     v |= ((uint64_t)cbp & 0x3fff) << 37;
     v |= ((uint64_t)cpsm & 0xf) << 51;
+    v |= ((uint64_t)csm & 1) << 55;
     v |= UINT64_C(1) << 61;
     return v;
 }
@@ -1863,9 +1874,8 @@ static void clut8_swizzle_rgba(uint8_t pal[256][4]) {
     }
 }
 
-/* Pixel-address permutations matching the Python implementation exactly.
-   Storage remains the original linear byte length; out-of-range page addresses
-   are ignored, which matters for non-page-aligned input dimensions. */
+/* GS block-address permutations. Storage retains the supplied byte length;
+   addresses outside a partial final page are ignored. */
 static uint8_t *gs_swizzle_32(const uint8_t *src, size_t n, int w, int h) {
     static const uint8_t bo[32] = {
         0,1,4,5,16,17,20,21,2,3,6,7,18,19,22,23,
@@ -1897,40 +1907,7 @@ static uint8_t *gs_swizzle_16(const uint8_t *src, size_t n, int w, int h) {
     return dst;
 }
 
-/* Indexed texture swizzles. These are provided for callers that need explicit
-   GS layout support; the Python-compatible TIM2 path intentionally keeps T8/T4
-   image bytes linear because the original CLI documents loader-side swizzling. */
-static void swizzle8_ps2(uint8_t *dst, const uint8_t *src, int width, int height) {
-    memset(dst,0,(size_t)width*height);
-    for(int y=0;y<height;y++)for(int x=0;x<width;x++){
-        int block_location=(y&(~0xf))*width+(x&(~0xf))*2;
-        int swap_selector=(((y+2)>>2)&1)*4;
-        int posY=(((y&(~3))>>1)+(y&1))&7;
-        int column_location=posY*width*2+((x+swap_selector)&7)*4;
-        int byte_num=((y>>1)&1)+((x>>2)&2);
-        size_t d=(size_t)block_location+column_location+byte_num;
-        if(d<(size_t)width*height)dst[d]=src[(size_t)y*width+x];
-    }
-}
-static void swizzle4_ps2(uint8_t *dst,const uint8_t *src,int width,int height){
-    /* Convert packed nibbles through a byte-index plane and apply the standard
-       PSMT4 128x128-page/32x16-block mapping. */
-    size_t np=(size_t)width*height; uint8_t *idx=xmalloc(np);
-    for(size_t i=0;i<np;i++)idx[i]=(uint8_t)((i&1)?src[i/2]>>4:src[i/2]&15);
-    memset(dst,0,(np+1)/2);
-    static const uint8_t block4[32]={0,2,8,10,1,3,9,11,4,6,12,14,5,7,13,15,
-                                    16,18,24,26,17,19,25,27,20,22,28,30,21,23,29,31};
-    int pages_w=(width+127)/128;
-    for(int y=0;y<height;y++)for(int x=0;x<width;x++){
-        int px=x&127,py=y&127,bx=px/32,by=py/16;
-        size_t page=(size_t)((y/128)*pages_w+x/128)*16384;
-        size_t pi=page+(size_t)block4[(by*4+bx)&31]*512+(size_t)(py&15)*32+(px&31);
-        if(pi<np){size_t b=pi/2;if(pi&1)dst[b]=(uint8_t)((dst[b]&15)|(idx[(size_t)y*width+x]<<4));
-                  else dst[b]=(uint8_t)((dst[b]&0xf0)|idx[(size_t)y*width+x]);}
-    }
-    free(idx);
-}
-
+/* Indexed texture layout helpers for PSMT8 and PSMT4. */
 static uint8_t *gs_unswizzle_32(const uint8_t *src, size_t n, int w, int h) {
     static const uint8_t bo[32] = {
         0,1,4,5,16,17,20,21,2,3,6,7,18,19,22,23,
@@ -1941,7 +1918,8 @@ static uint8_t *gs_unswizzle_32(const uint8_t *src, size_t n, int w, int h) {
         int px=x%64,py=y%32,bi=(py/8)*8+(px/8),ab=bo[bi&31];
         size_t si=(size_t)(((y/32)*pages_w+x/64)*2048+ab*64+(py%8)*8+(px%8))*4;
         size_t di=((size_t)y*w+x)*4;if(si+4<=n&&di+4<=n)memcpy(dst+di,src+si,4);
-    }return dst;
+    }
+    return dst;
 }
 static uint8_t *gs_unswizzle_16(const uint8_t *src,size_t n,int w,int h){
     static const uint8_t bo[64]={0,2,8,10,32,34,40,42,1,3,9,11,33,35,41,43,
@@ -1952,7 +1930,8 @@ static uint8_t *gs_unswizzle_16(const uint8_t *src,size_t n,int w,int h){
         int px=x%64,py=y%64,bi=(py/8)*4+(px/16),ab=bo[bi&63];
         size_t si=(size_t)(((y/64)*pages_w+x/64)*4096+ab*128+(py%8)*16+(px%16))*2;
         size_t di=((size_t)y*w+x)*2;if(si+2<=n&&di+2<=n)memcpy(dst+di,src+si,2);
-    }return dst;
+    }
+    return dst;
 }
 static uint8_t *unswizzle8_ps2(const uint8_t *src,int width,int height){
     size_t n=(size_t)width*height;uint8_t *dst=xcalloc(n,1);
@@ -1964,7 +1943,8 @@ static uint8_t *unswizzle8_ps2(const uint8_t *src,int width,int height){
         int byte_num=((y>>1)&1)+((x>>2)&2);
         size_t si=(size_t)block_location+column_location+byte_num;
         if(si<n)dst[(size_t)y*width+x]=src[si];
-    }return dst;
+    }
+    return dst;
 }
 static uint8_t *unswizzle4_ps2(const uint8_t *src,int width,int height){
     size_t np=(size_t)width*height;uint8_t *idx=xcalloc(np,1),*dst=xcalloc((np+1)/2,1);
@@ -1989,8 +1969,24 @@ static uint8_t *pack_32(const Image *im, size_t *len) {
     return p;
 }
 static uint8_t *pack_24(const Image *im, size_t *len) {
-    *len=(size_t)im->w*im->h*3; uint8_t *p=xmalloc(*len);
-    for(size_t i=0;i<(size_t)im->w*im->h;i++)memcpy(p+i*3,im->rgba+i*4,3);
+    size_t count = (size_t)im->w * (size_t)im->h;
+    *len = count * 3u;
+    uint8_t *p = xmalloc(*len);
+
+    /*
+     * PSMCT24 has no alpha channel. Flatten the source over white so
+     * transparent source pixels do not turn into black in the preview.
+     */
+    for (size_t i = 0; i < count; i++) {
+        const uint8_t *src = im->rgba + i * 4u;
+        unsigned a = src[3];
+        p[i * 3u + 0u] = (uint8_t)(((unsigned)src[0] * a +
+                                    255u * (255u - a) + 127u) / 255u);
+        p[i * 3u + 1u] = (uint8_t)(((unsigned)src[1] * a +
+                                    255u * (255u - a) + 127u) / 255u);
+        p[i * 3u + 2u] = (uint8_t)(((unsigned)src[2] * a +
+                                    255u * (255u - a) + 127u) / 255u);
+    }
     return p;
 }
 static uint8_t *pack_16(const Image *im, bool dither, size_t *len) {
@@ -2007,7 +2003,7 @@ static uint8_t *pack_16(const Image *im, bool dither, size_t *len) {
 }
 
 typedef struct { uint8_t *pixels,*clut; size_t pixel_n,clut_n; } IndexedPack;
-static IndexedPack pack_indexed(const Image *im,int colors,bool dither) {
+static IndexedPack pack_indexed(const Image *im,int colors,bool dither,bool csm2) {
     IndexedPack q={0}; uint8_t pal[256][3], cpal[256][4];
     int actual=build_median_palette(im,colors,pal);
     uint64_t asum[256]; uint32_t acount[256];
@@ -2022,67 +2018,93 @@ static IndexedPack pack_indexed(const Image *im,int colors,bool dither) {
         cpal[i][0]=pal[i][0];cpal[i][1]=pal[i][1];cpal[i][2]=pal[i][2];
         cpal[i][3]=ps2_alpha(acount[i]?(unsigned)llrint((double)asum[i]/acount[i]):255);
     }
-    if(colors==256)clut8_swizzle_rgba(cpal);
+    if(colors==256&&!csm2)clut8_swizzle_rgba(cpal);
     q.clut_n=(size_t)colors*4;q.clut=xmalloc(q.clut_n);memcpy(q.clut,cpal,q.clut_n);
     return q;
 }
 
-static void append_mipmap_sizes(Buffer *dst,const Image *base,int fmt,bool dither) {
-    int w=base->w,h=base->h;
-    while(w>1||h>1){w=w>1?w/2:1;h=h>1?h/2:1;Image *m=resize_lanczos((Image*)base,w,h);
-        if(!m){fprintf(stderr,"fatal: mipmap resize failed: %s\n",g_error);exit(2);}size_t n=0;uint8_t *p=NULL;
-        if(fmt==32)p=pack_32(m,&n);else if(fmt==24)p=pack_24(m,&n);else if(fmt==16)p=pack_16(m,dither,&n);
-        else{IndexedPack q=pack_indexed(m,fmt==8?256:16,dither);p=q.pixels;n=q.pixel_n;free(q.clut);}
-        buf_put(dst,p,n);free(p);image_free(m);
+static uint8_t *pack_high_lane(const uint8_t *indices,size_t count,int fmt,size_t *out_n){
+    *out_n=count*4;uint8_t *out=xcalloc(*out_n,1);
+    for(size_t i=0;i<count;i++){
+        if(fmt==81)out[i*4+3]=indices[i];
+        else if(fmt==41)out[i*4+3]=(uint8_t)(indices[i]&15);
+        else if(fmt==42)out[i*4+3]=(uint8_t)((indices[i]&15)<<4);
     }
+    return out;
 }
-static int mipmap_levels_for(int w,int h){int n=1;while(w>1||h>1){w=w>1?w/2:1;h=h>1?h/2:1;n++;}return n;}
-
-/* Build one 48-byte TIM2 picture header followed by base image, optional full
-   mip chain, indexed palette, and 128-byte block padding. */
-static bool build_tim2(Image *im,int fmt,bool premult,bool dither,bool swizzle,bool mipmaps,Buffer *out){
+static bool build_tim2(Image *im,int fmt,bool premult,bool dither,bool swizzle,bool mipmaps,bool csm2,const char *clut_format,Buffer *out){
     if(im->w<=0||im->h<=0||im->w>65535||im->h>65535){set_error("TIM2 dimensions must be 1..65535");return false;}
-    if(premult&&(fmt==32||fmt==16))premultiply_alpha(im);
+    if(premult&&(fmt==32||fmt==16||fmt==161))premultiply_alpha(im);
     uint8_t img_type=0,clut_type=CLUT_NONE;uint16_t clut_colors=0;int psm=GS_PSM_CT32;
-    uint8_t *base=NULL,*clut=NULL;size_t base_n=0,clut_n=0;
+    uint8_t *base=NULL,*clut=NULL;size_t base_n=0,clut_n=0;int cpsm=GS_CPSM_CT32,tcc=1;
     if(fmt==32){img_type=IMG_RGBA32;psm=GS_PSM_CT32;base=pack_32(im,&base_n);}
-    else if(fmt==24){img_type=IMG_RGB24;psm=GS_PSM_CT32;base=pack_24(im,&base_n);}
-    else if(fmt==16){img_type=IMG_RGBA16;psm=GS_PSM_CT16;base=pack_16(im,dither,&base_n);}
-    else {int nc=fmt==8?256:16;IndexedPack q=pack_indexed(im,nc,dither);base=q.pixels;base_n=q.pixel_n;
-        clut=q.clut;clut_n=q.clut_n;clut_colors=(uint16_t)nc;clut_type=CLUT_RGBA32;
-        img_type=fmt==8?IMG_INDEXED8:IMG_INDEXED4;psm=fmt==8?GS_PSM_T8:GS_PSM_T4;}
+    else if(fmt==24){img_type=IMG_RGB24;psm=GS_PSM_CT24;base=pack_24(im,&base_n);tcc=0;}
+    else if(fmt==16||fmt==161){img_type=IMG_RGBA16;psm=fmt==161?GS_PSM_CT16S:GS_PSM_CT16;base=pack_16(im,dither,&base_n);}
+    else {
+        int nc=(fmt==8||fmt==81)?256:16;
+        IndexedPack q=pack_indexed(im,nc,dither,csm2);base=q.pixels;base_n=q.pixel_n;clut=q.clut;clut_n=q.clut_n;
+        clut_colors=(uint16_t)nc;img_type=nc==256?IMG_INDEXED8:IMG_INDEXED4;
+        if(fmt==8)psm=GS_PSM_T8;else if(fmt==4)psm=GS_PSM_T4;else if(fmt==81)psm=GS_PSM_T8H;else if(fmt==41)psm=GS_PSM_T4HL;else if(fmt==42)psm=GS_PSM_T4HH;
+        const char *cf=clut_format?clut_format:"32";
+        if(!strcmp(cf,"16")||!strcmp(cf,"16s")){
+            uint8_t *packed=xmalloc((size_t)nc*2);
+            for(int i=0;i<nc;i++)wr16(packed+i*2,rgba_to_ps2_5551(clut[i*4],clut[i*4+1],clut[i*4+2],alpha_from_ps2(clut[i*4+3])));
+            free(clut);clut=packed;clut_n=(size_t)nc*2;clut_type=CLUT_RGBA16;cpsm=!strcmp(cf,"16s")?0x0A:0x02;
+        }else if(!strcmp(cf,"24")){
+            for(int i=0;i<nc;i++)clut[i*4+3]=0;
+            clut_type=CLUT_RGB32;cpsm=0x01;tcc=0;
+        }else if(!strcmp(cf,"32")){clut_type=CLUT_RGBA32;cpsm=0x00;}
+        else {free(base);free(clut);set_error("--clut-format must be 16, 16s, 24, or 32");return false;}
+        if(fmt==81){uint8_t *high=pack_high_lane(base,(size_t)im->w*im->h,fmt,&base_n);free(base);base=high;}
+        else if(fmt==41||fmt==42){
+            size_t np=(size_t)im->w*im->h;
+            uint8_t *indices=xmalloc(np);
+            for(size_t i=0;i<np;i++){
+                uint8_t packed=base[i/2];
+                indices[i]=(uint8_t)((i&1)?(packed>>4):(packed&0x0F));
+            }
+            uint8_t *high=pack_high_lane(indices,np,fmt,&base_n);
+            free(indices);free(base);base=high;
+        }
+    }
     if(swizzle){uint8_t *s=NULL;
-        if(fmt==32)s=gs_swizzle_32(base,base_n,im->w,im->h);
-        else if(fmt==16)s=gs_swizzle_16(base,base_n,im->w,im->h);
+        if(fmt==32||fmt==81||fmt==41||fmt==42)s=gs_swizzle_32(base,base_n,im->w,im->h);
+        else if(fmt==16||fmt==161)s=gs_swizzle_16(base,base_n,im->w,im->h);
         if(s){free(base);base=s;}
     }
     Buffer images={0};buf_put(&images,base,base_n);free(base);
     int mip_count=1;
-    if(mipmaps){append_mipmap_sizes(&images,im,fmt,dither);mip_count=mipmap_levels_for(im->w,im->h)-1;if(mip_count<1)mip_count=1;}
+    if(mipmaps){
+        int mw=im->w,mh=im->h;
+        while(mw>1||mh>1){mw=mw>1?mw/2:1;mh=mh>1?mh/2:1;Image *m=resize_lanczos(im,mw,mh);if(!m){free(images.p);free(clut);return false;}
+            size_t mn=0;uint8_t *mp=NULL;
+            if(fmt==32)mp=pack_32(m,&mn);else if(fmt==24)mp=pack_24(m,&mn);else if(fmt==16||fmt==161)mp=pack_16(m,dither,&mn);
+            else {IndexedPack q=pack_indexed(m,(fmt==8||fmt==81)?256:16,dither,false);mp=q.pixels;mn=q.pixel_n;free(q.clut);if(fmt==81){uint8_t *hi=pack_high_lane(mp,(size_t)mw*mh,fmt,&mn);free(mp);mp=hi;}else if(fmt==41||fmt==42){size_t np=(size_t)mw*mh;uint8_t *indices=xmalloc(np);for(size_t i=0;i<np;i++){uint8_t packed=mp[i/2];indices[i]=(uint8_t)((i&1)?(packed>>4):(packed&0x0F));}uint8_t *hi=pack_high_lane(indices,np,fmt,&mn);free(indices);free(mp);mp=hi;}}
+            buf_put(&images,mp,mn);free(mp);image_free(m);mip_count++;
+        }
+    }
     if(images.n>UINT32_MAX||clut_n>UINT32_MAX){free(images.p);free(clut);set_error("TIM2 data exceeds 32-bit block fields");return false;}
-    size_t raw=48+images.n+clut_n,total=(raw+127)&~(size_t)127;
-    if(total>UINT32_MAX){free(images.p);free(clut);set_error("TIM2 block too large");return false;}
+    size_t raw=48+images.n+clut_n,total=raw;if(total>UINT32_MAX){free(images.p);free(clut);set_error("TIM2 block too large");return false;}
     uint8_t h[48]={0};wr32(h,(uint32_t)total);wr32(h+4,(uint32_t)clut_n);wr32(h+8,(uint32_t)images.n);
-    wr16(h+12,48);wr16(h+14,clut_colors);h[16]=(uint8_t)mip_count;h[17]=clut_type;h[18]=img_type;
-    wr16(h+20,(uint16_t)im->w);wr16(h+22,(uint16_t)im->h);
-    wr64(h+24,compute_gs_tex0(im->w,im->h,psm,GS_CPSM_CT32,0));
+    wr16(h+12,48);wr16(h+14,clut_colors);h[16]=0;h[17]=(uint8_t)mip_count;h[18]=clut_type;h[19]=img_type;
+    wr16(h+20,(uint16_t)im->w);wr16(h+22,(uint16_t)im->h);wr64(h+24,compute_gs_tex0(im->w,im->h,psm,cpsm,0,csm2?1:0,tcc));
     wr32(h+40,clut_colors?compute_gs_texclut(1,0,0):0);
-    uint8_t fh[16]={ 'T','I','M','2',TIM2_VERSION,0,1,0,0,0,0,0,0,0,0,0 };
-    buf_put(out,fh,16);buf_put(out,h,48);buf_put(out,images.p,images.n);if(clut_n)buf_put(out,clut,clut_n);
-    buf_zero(out,total-raw);free(images.p);free(clut);return true;
+    uint8_t fh[16]={'T','I','M','2',TIM2_VERSION,0,1,0,0,0,0,0,0,0,0,0};
+    buf_put(out,fh,16);buf_put(out,h,48);buf_put(out,images.p,images.n);if(clut_n)buf_put(out,clut,clut_n);free(images.p);free(clut);return true;
 }
 
 /* Defensive parser for the first picture in a TIM2 file. */
 typedef struct {
     const uint8_t *raw,*pixels,*clut;size_t file_n,pixel_available,clut_available;
-    uint8_t version,file_format,mipmap_count,clut_type,img_type;
+    uint8_t version,file_format,picture_format,mipmap_count,clut_type,img_type;
+    unsigned psm,cpsm,csm;
     uint16_t num_pictures,hdr_size,clut_colors,width,height;
     uint32_t block_total,clut_size,img_size,gs_texclut;uint64_t gs_tex0,gs_tex1;
     size_t image_start,clut_start,block_end;
 } Tim2Info;
 static const char *img_type_name(int t){switch(t){case IMG_RGBA32:return "32-bit RGBA8888";case IMG_RGBA16:return "16-bit RGBA5551";case IMG_RGB24:return "24-bit RGB888 (no Alpha)";case IMG_INDEXED8:return "8-bit Indexed (256 colors)";case IMG_INDEXED4:return "4-bit Indexed (16 colors)";case IMG_INDEXED4_SONY:return "4-bit Indexed (Sony variant)";default:return "Unknown";}}
-static const char *clut_type_name(int t){switch(t){case 0:return "none";case 1:return "RGBA5551";case 2:return "RGBA8888";default:return "Unknown";}}
-static bool valid_img_type(int t){return t==0||t==1||t==2||t==3||t==5||t==6;}
+static const char *clut_type_name(int t){switch(t){case 0:return "none";case 1:return "RGBA5551";case 2:return "RGB888";case 3:return "RGBA8888";default:return "Unknown";}}
+static bool valid_img_type(int t){return t==0||t==1||t==2||t==3||t==4||t==5;}
 static bool parse_tim2_mem(const uint8_t*d,size_t n,Tim2Info*t){
     memset(t,0,sizeof(*t));t->raw=d;t->file_n=n;
     if(n<16){set_error("file too small for TIM2 file header");return false;}
@@ -2091,8 +2113,8 @@ static bool parse_tim2_mem(const uint8_t*d,size_t n,Tim2Info*t){
     if(!t->num_pictures){set_error("TIM2 contains no pictures");return false;}
     if(n<64){set_error("truncated TIM2 picture header");return false;}
     const uint8_t*h=d+16;t->block_total=rd32(h);t->clut_size=rd32(h+4);t->img_size=rd32(h+8);
-    t->hdr_size=rd16(h+12);t->clut_colors=rd16(h+14);t->mipmap_count=h[16];t->clut_type=h[17];t->img_type=h[18];
-    t->width=rd16(h+20);t->height=rd16(h+22);t->gs_tex0=rd64(h+24);t->gs_tex1=rd64(h+32);t->gs_texclut=rd32(h+40);
+    t->hdr_size=rd16(h+12);t->clut_colors=rd16(h+14);t->picture_format=h[16];t->mipmap_count=h[17];t->clut_type=h[18];t->img_type=h[19];
+    t->width=rd16(h+20);t->height=rd16(h+22);t->gs_tex0=rd64(h+24);t->gs_tex1=rd64(h+32);t->gs_texclut=rd32(h+40);t->psm=(unsigned)((t->gs_tex0>>20)&63);t->cpsm=(unsigned)((t->gs_tex0>>51)&15);t->csm=(unsigned)((t->gs_tex0>>55)&1);
     if(t->hdr_size<48||t->hdr_size>n-16){set_error("invalid picture header size %u",t->hdr_size);return false;}
     t->image_start=16+t->hdr_size;
     if(t->image_start>n||t->img_size>n-t->image_start){set_error("truncated image data (declared %u bytes)",t->img_size);return false;}
@@ -2103,12 +2125,23 @@ static bool parse_tim2_mem(const uint8_t*d,size_t n,Tim2Info*t){
     return true;
 }
 static bool read_tim2(const char*path,uint8_t**d,size_t*n,Tim2Info*t){if(!read_file(path,d,n))return false;if(!parse_tim2_mem(*d,*n,t)){free(*d);*d=NULL;return false;}return true;}
-static size_t base_pixel_size(const Tim2Info*t){size_t np=(size_t)t->width*t->height;switch(t->img_type){case IMG_RGBA32:return np*4;case IMG_RGBA16:return np*2;case IMG_RGB24:return np*3;case IMG_INDEXED8:return np;case IMG_INDEXED4:case IMG_INDEXED4_SONY:return(np+1)/2;default:return 0;}}
+static size_t base_pixel_size(const Tim2Info*t){
+    size_t np=(size_t)t->width*t->height;
+    switch(t->psm){
+        case GS_PSM_CT32: return np*4;
+        case GS_PSM_CT24: return np*3;
+        case GS_PSM_CT16: case GS_PSM_CT16S: return np*2;
+        case GS_PSM_T8: return np;
+        case GS_PSM_T4: return (np+1)/2;
+        case GS_PSM_T8H: case GS_PSM_T4HL: case GS_PSM_T4HH: return np*4;
+        default: return 0;
+    }
+}
 
 static bool tim2_info_file(const char*path){uint8_t*d;size_t n;Tim2Info t;if(!read_tim2(path,&d,&n,&t))return false;
     uint64_t v=t.gs_tex0;unsigned tbp0=v&0x3fff,tbw=(v>>14)&0x3f,psm=(v>>20)&0x3f,tw=(v>>26)&15,th=(v>>30)&15,tcc=(v>>34)&1,tfx=(v>>35)&3,cbp=(v>>37)&0x3fff,cpsm=(v>>51)&15,csm=(v>>55)&1,cld=(v>>61)&7;
     printf("\n----------------------------------------------------\n  File        :  %s\n  File size   :  %.2f KB  (%zu bytes)\n----------------------------------------------------\n",path_base(path),n/1024.0,n);
-    printf("  TIM2 version:  0x%02X\n  Pictures    :  %u\n  Mipmaps     :  %u\n----------------------------------------------------\n",t.version,t.num_pictures,t.mipmap_count);
+    printf("  TIM2 version:  0x%02X\n  Pictures    :  %u\n  Picture fmt :  %u (0=uncompressed)\n  Mipmaps     :  %u\n----------------------------------------------------\n",t.version,t.num_pictures,t.picture_format,t.mipmap_count);
     printf("  Format      :  %s\n  Width       :  %u px\n  Height      :  %u px\n  Power-of-2  :  %s\n  Image data  :  %.2f KB  (%u bytes)\n----------------------------------------------------\n",img_type_name(t.img_type),t.width,t.height,(is_power2(t.width)&&is_power2(t.height))?"yes":"NO <-- non-power-of-2",t.img_size/1024.0,t.img_size);
     printf("  CLUT type   :  %s\n  CLUT colors :  %s",clut_type_name(t.clut_type),t.clut_colors?"":"none\n");if(t.clut_colors)printf("%u\n",t.clut_colors);printf("  CLUT size   :  %u bytes\n----------------------------------------------------\n",t.clut_size);
     printf("  GsTex0      :  0x%016llX\n    TBP0      :  0x%04X\n    TBW       :  %u\n    PSM       :  0x%02X\n    TW/TH     :  %u/%u\n    TCC/TFX   :  %u/%u\n    CBP       :  0x%04X\n    CPSM/CSM  :  0x%02X/%u\n    CLD       :  %u\n  GsTexClut   :  0x%08X\n----------------------------------------------------\n",(unsigned long long)v,tbp0,tbw,psm,tw,th,tcc,tfx,cbp,cpsm,csm,cld,t.gs_texclut);free(d);return true;}
@@ -2120,18 +2153,18 @@ static bool verify_tim2_file(const char*path){printf("\n------------------------
     CHK(n>=64,"File size OK","File too small",false);if(n<64){free(d);return false;}
     CHK(!memcmp(d,"TIM2",4),"Magic Number OK","Invalid Magic Number",false);if(memcmp(d,"TIM2",4)){free(d);return false;}
     if(!parse_tim2_mem(d,n,&t)){printf("  [FAIL]  %s\n",g_error);free(d);return false;}
-    CHK(t.version==4,"Version OK","Unexpected Version",true);CHK(t.hdr_size==48,"Header Size OK","Unexpected Header Size",false);
+    CHK(t.version==4,"Version OK","Unexpected Version",true);CHK(t.picture_format==0,"Picture format OK","Unsupported picture format",false);CHK(t.mipmap_count>=1,"Mipmap count OK","Invalid mipmap count",false);CHK(t.hdr_size==48,"Header Size OK","Unexpected Header Size",false);
     CHK(valid_img_type(t.img_type),"Image Type OK","Unknown Image Type",false);CHK(t.width&&t.height,"Dimensions OK","Invalid Dimensions",false);
     CHK(is_power2(t.width)&&is_power2(t.height),"Power-of-2 OK","Non-power-of-2 dimensions",true);
-    CHK(n>=16+(size_t)t.block_total,"File completeness OK","File appears truncated",false);CHK(t.block_total%128==0,"Block alignment OK","Block not aligned to 128",false);
-    size_t computed=(size_t)t.hdr_size+t.img_size+t.clut_size,aligned=(computed+127)&~(size_t)127;
-    CHK(t.block_total==aligned,"Block size consistent","Block size mismatch",false);
+    CHK(n>=16+(size_t)t.block_total,"File completeness OK","File appears truncated",false);CHK(t.block_total>=(uint32_t)(t.hdr_size+t.img_size+t.clut_size),"Picture block size OK","Picture block smaller than declared payload",false);
+    size_t computed=(size_t)t.hdr_size+t.img_size+t.clut_size;
+    CHK(t.block_total==computed,"Block size consistent","Block size mismatch",false);
     int ec=(t.img_type==IMG_INDEXED8)?256:(t.img_type==IMG_INDEXED4||t.img_type==IMG_INDEXED4_SONY)?16:0;
     CHK(t.clut_colors==ec,"CLUT colors OK","CLUT color count mismatch",false);
     unsigned tw=(unsigned)((t.gs_tex0>>26)&15),th=(unsigned)((t.gs_tex0>>30)&15);
     CHK(tw==ceil_log2_u(t.width)&&th==ceil_log2_u(t.height),"GsTex0 TW/TH OK","GsTex0 TW/TH mismatch",true);
     size_t base=base_pixel_size(&t);CHK(t.img_size>=base,"Base image data size OK","Image data smaller than base level",false);
-    if(ec)CHK(t.clut_size==(uint32_t)ec*4,"CLUT byte size OK","CLUT byte size mismatch",false);
+    if(ec){size_t cb=(t.clut_type==CLUT_RGBA16)?2u:4u;CHK(t.clut_size>=(uint32_t)ec*cb,"CLUT byte size OK","CLUT byte size too small",false);}
 #undef CHK
     printf("----------------------------------------------------\n  Result: %s",ok?(warns?"VALID with warnings":"VALID - all checks passed"):"INVALID");if(errors||warns)printf(" (%d error(s), %d warning(s))",errors,warns);puts("\n----------------------------------------------------");free(d);return ok;}
 
@@ -2139,7 +2172,26 @@ static Image*decode_tim2_image(const Tim2Info*t){int w=t->width,h=t->height;size
     if(t->img_type==IMG_RGBA32){for(size_t i=0;i<np;i++){memcpy(im->rgba+i*4,pix+i*4,3);im->rgba[i*4+3]=alpha_from_ps2(pix[i*4+3]);}}
     else if(t->img_type==IMG_RGBA16){for(size_t i=0;i<np;i++)ps2_5551_to_rgba(rd16(pix+i*2),im->rgba+i*4);}
     else if(t->img_type==IMG_RGB24){for(size_t i=0;i<np;i++){memcpy(im->rgba+i*4,pix+i*3,3);im->rgba[i*4+3]=255;}}
-    else {int nc=(t->img_type==IMG_INDEXED8)?256:16;if(t->clut_colors<nc||t->clut_available<(size_t)nc*4){image_free(im);set_error("indexed TIM2 has missing CLUT");return NULL;}uint8_t pal[256][4];memset(pal,0,sizeof(pal));for(int i=0;i<nc;i++){memcpy(pal[i],t->clut+i*4,3);pal[i][3]=alpha_from_ps2(t->clut[i*4+3]);}if(nc==256)clut8_swizzle_rgba(pal);for(size_t i=0;i<np;i++){unsigned k=nc==256?t->pixels[i]:((i&1)?t->pixels[i/2]>>4:t->pixels[i/2]&15);memcpy(im->rgba+i*4,pal[k],4);}}
+    else {
+        int nc=(t->img_type==IMG_INDEXED8)?256:16;
+        size_t entry=(t->clut_type==CLUT_RGBA16)?2u:4u;
+        if(t->clut_colors<nc||t->clut_available<(size_t)nc*entry){image_free(im);set_error("indexed TIM2 has missing or truncated CLUT");return NULL;}
+        uint8_t pal[256][4];memset(pal,0,sizeof(pal));
+        for(int i=0;i<nc;i++){
+            if(entry==2)ps2_5551_to_rgba(rd16(t->clut+i*2),pal[i]);
+            else {memcpy(pal[i],t->clut+i*4,3);pal[i][3]=(t->clut_type==CLUT_RGB32)?255:alpha_from_ps2(t->clut[i*4+3]);}
+        }
+        if(nc==256&&t->csm==0)clut8_swizzle_rgba(pal);
+        for(size_t i=0;i<np;i++){
+            unsigned k;
+            if(t->psm==GS_PSM_T8H)k=pix[i*4+3];
+            else if(t->psm==GS_PSM_T4HL)k=pix[i*4+3]&15;
+            else if(t->psm==GS_PSM_T4HH)k=(pix[i*4+3]>>4)&15;
+            else if(nc==256)k=t->pixels[i];
+            else k=(i&1)?(t->pixels[i/2]>>4):(t->pixels[i/2]&15);
+            memcpy(im->rgba+i*4,pal[k],4);
+        }
+    }
     free(linear);return im;
 }
 
@@ -2148,7 +2200,7 @@ static bool save_jpeg(const char*path,const Image*im){FILE*f=fopen(path,"wb");if
 static bool save_extract(const char*path,const Image*src){const char*e=path_ext(path);bool flat=!strcasecmp(e,".jpg")||!strcasecmp(e,".jpeg")||!strcasecmp(e,".bmp")||!strcasecmp(e,".ppm");Image*tmp=flat?composite_white(src):NULL;const Image*im=tmp?tmp:src;bool ok;if(!strcasecmp(e,".jpg")||!strcasecmp(e,".jpeg"))ok=save_jpeg(path,im);else ok=save_image(path,im);image_free(tmp);return ok;}
 static bool extract_tim2(const char*path,const char*ext,char**outpath){uint8_t*d;size_t n;Tim2Info t;if(!read_tim2(path,&d,&n,&t))return false;Image*im=decode_tim2_image(&t);free(d);if(!im)return false;*outpath=replace_ext(path,ext);bool ok=save_extract(*outpath,im);image_free(im);if(!ok){free(*outpath);*outpath=NULL;}return ok;}
 
-static bool has_transparency(const Tim2Info*t){size_t base=base_pixel_size(t);if(t->img_type==IMG_RGBA32){for(size_t i=3;i<base;i+=4)if(t->pixels[i]<0x80)return true;}else if(t->img_type==IMG_RGBA16){for(size_t i=0;i+1<base;i+=2)if(!(rd16(t->pixels+i)&0x8000))return true;}else if(t->img_type==IMG_INDEXED8||t->img_type==IMG_INDEXED4||t->img_type==IMG_INDEXED4_SONY){size_t bpc=t->clut_colors?t->clut_size/t->clut_colors:4;if(bpc==4)for(size_t i=3;i<t->clut_size;i+=4)if(t->clut[i]<0x80)return true;}return false;}
+static bool has_transparency(const Tim2Info*t){size_t base=base_pixel_size(t);if(t->img_type==IMG_RGBA32){for(size_t i=3;i<base;i+=4)if(t->pixels[i]<0x80)return true;}else if(t->img_type==IMG_RGBA16){for(size_t i=0;i+1<base;i+=2)if(!(rd16(t->pixels+i)&0x8000))return true;}else if(t->img_type==IMG_INDEXED8||t->img_type==IMG_INDEXED4||t->img_type==IMG_INDEXED4_SONY){size_t bpc=t->clut_colors?t->clut_size/t->clut_colors:4;if(t->clut_type==CLUT_RGBA16){for(size_t i=0;i+1<t->clut_size;i+=2)if(!(rd16(t->clut+i)&0x8000))return true;}else if(bpc>=4&&t->clut_type==CLUT_RGBA32){for(size_t i=3;i<t->clut_size;i+=4)if(t->clut[i]<0x80)return true;}}return false;}
 typedef enum{DIFF_SAFE,DIFF_WARNING,DIFF_UNSAFE}DiffLevel;
 static DiffLevel diff_files(const char*a,const char*b,bool heading){uint8_t*da=NULL,*db=NULL;size_t na=0,nb=0;Tim2Info x,y;if(heading)printf("\n--------------------------------------------------------\n  Original : %s\n  Modified : %s\n--------------------------------------------------------\n",path_base(a),path_base(b));if(!read_tim2(a,&da,&na,&x)){printf("  [FAIL] Cannot read original: %s\n",g_error);return DIFF_UNSAFE;}if(!read_tim2(b,&db,&nb,&y)){printf("  [FAIL] Cannot read modified: %s\n",g_error);free(da);return DIFF_UNSAFE;}int issues=0,warns=0;
     if(x.img_type==y.img_type)printf("  [OK]    Format       : %s\n",img_type_name(x.img_type));else{printf("  [FAIL]  Format       : %s -> %s\n",img_type_name(x.img_type),img_type_name(y.img_type));issues++;}
@@ -2170,18 +2222,18 @@ static char*find_by_name(const StrVec*s,const char*n){for(size_t i=0;i<s->n;i++)
 static void diff_summary(int n,int safe,int warn,int bad){printf("\n========================================================\n  Summary: %d compared | SAFE %d | WARNING %d | UNSAFE %d\n========================================================\n",n,safe,warn,bad);}
 static int diff_folders(const char*a,const char*b){StrVec x={0},y={0};scan_tm2_recursive(a,&x);scan_tm2_recursive(b,&y);qsort(x.v,x.n,sizeof(char*),cmp_strp);qsort(y.v,y.n,sizeof(char*),cmp_strp);printf("\n========================================================\n  Comparing folders:\n  Original : %s (%zu TIM2 files)\n  Modified : %s (%zu TIM2 files)\n========================================================\n",a,x.n,b,y.n);int n=0,safe=0,warn=0,bad=0,missing=0,extra=0;for(size_t i=0;i<x.n;i++){char*q=find_by_name(&y,filename_only(x.v[i]));if(!q){printf("  [WARN] Missing in modified: %s\n",filename_only(x.v[i]));missing++;}else{DiffLevel z=diff_files(x.v[i],q,true);n++;safe+=z==DIFF_SAFE;warn+=z==DIFF_WARNING;bad+=z==DIFF_UNSAFE;}}for(size_t i=0;i<y.n;i++)if(!find_by_name(&x,filename_only(y.v[i]))){printf("  [INFO] Extra in modified: %s\n",filename_only(y.v[i]));extra++;}diff_summary(n,safe,warn,bad);printf("  Missing: %d | Extra: %d\n",missing,extra);sv_free(&x);sv_free(&y);return bad?1:0;}
 
-typedef struct{StrVec images,original,modified;const char*format,*output,*output_dir,*resize,*extract,*diff_list,*list;bool dither,no_premult,swizzle,mipmaps,info,verify,diff,list_formats,help,version;}Options;
-static void usage(FILE*f,const char*p){fprintf(f,"PS2 TIM2 Converter - native C edition\nUsage:\n  %s <image(s)> --format <4bit|8bit|16bit|24bit|32bit> [options]\n  %s <file.tm2> --info | --verify | --extract png\n  %s --list convert.txt [options]\n  %s --diff --original a.tm2 --modified b.tm2\n\nOptions:\n  -f, --format FMT     output TIM2 format\n  -o, --output FILE    output for one input\n  --output-dir DIR     output folder\n  --no-premult         disable alpha premultiplication\n  --dither             Floyd-Steinberg dithering\n  --resize up|down     resize to a power of two (Lanczos-3)\n  --swizzle            pre-swizzle GS texture data\n  --mipmaps            append a full mipmap chain\n  --info               display TIM2 metadata\n  --verify             run structural checks\n  --extract EXT        png, jpg, jpeg, bmp, tga, tif, tiff, webp, ppm\n  --list FILE          batch list: <filename> <format>\n  --diff               compare files/folders\n  --original PATH...   original inputs for diff\n  --modified PATH...   modified inputs for diff\n  --diff-list FILE     pairs list (first content row is header)\n  -l, --list-formats   show supported formats\n  --version            show version\n  -h, --help           show this help\n",p,p,p,p);}
-static void list_formats(void){puts("Supported input formats:\n  .bmp, .dds, .gif, .ico, .jpeg, .jpg, .pbm, .pgm, .png, .ppm, .tga, .tif, .tiff, .webp\n\nOutput TIM2 formats:\n  --format 32bit    RGBA8888 | full color + 8-bit alpha\n  --format 24bit    RGB888   | full color, no alpha\n  --format 16bit    RGBA5551 | 32K colors + 1-bit alpha\n  --format 8bit     Indexed8 | 256 colors + CSM1 CLUT\n  --format 4bit     Indexed4 | 16 colors + CLUT\n\nExtraction: png, jpg/jpeg, bmp, tga, tif/tiff, webp, ppm\nAll codecs and processing are in-process; no external converter is invoked.");}
-static bool option_value(const char*s){return !strcmp(s,"--format")||!strcmp(s,"-f")||!strcmp(s,"--output")||!strcmp(s,"-o")||!strcmp(s,"--output-dir")||!strcmp(s,"--resize")||!strcmp(s,"--extract")||!strcmp(s,"--list")||!strcmp(s,"--diff-list");}
-static bool parse_options(int argc,char**argv,Options*o){memset(o,0,sizeof(*o));enum{NORMAL,ORIG,MOD}mode=NORMAL;for(int i=1;i<argc;i++){const char*a=argv[i];if(!strcmp(a,"--original")){mode=ORIG;continue;}if(!strcmp(a,"--modified")){mode=MOD;continue;}if(a[0]=='-'){mode=NORMAL;if(!strcmp(a,"-h")||!strcmp(a,"--help"))o->help=true;else if(!strcmp(a,"--version"))o->version=true;else if(!strcmp(a,"--dither"))o->dither=true;else if(!strcmp(a,"--no-premult"))o->no_premult=true;else if(!strcmp(a,"--swizzle"))o->swizzle=true;else if(!strcmp(a,"--mipmaps"))o->mipmaps=true;else if(!strcmp(a,"--info"))o->info=true;else if(!strcmp(a,"--verify"))o->verify=true;else if(!strcmp(a,"--diff"))o->diff=true;else if(!strcmp(a,"--list-formats")||!strcmp(a,"-l"))o->list_formats=true;else if(option_value(a)){if(++i>=argc){fprintf(stderr,"ERROR: %s requires a value\n",a);return false;}const char*v=argv[i];if(!strcmp(a,"--format")||!strcmp(a,"-f"))o->format=v;else if(!strcmp(a,"--output")||!strcmp(a,"-o"))o->output=v;else if(!strcmp(a,"--output-dir"))o->output_dir=v;else if(!strcmp(a,"--resize"))o->resize=v;else if(!strcmp(a,"--extract"))o->extract=v;else if(!strcmp(a,"--list"))o->list=v;else o->diff_list=v;}else{fprintf(stderr,"ERROR: unknown option '%s'\n",a);return false;}continue;}if(mode==ORIG)sv_add(&o->original,a);else if(mode==MOD)sv_add(&o->modified,a);else sv_add(&o->images,a);}return true;}
-static int fmt_number(const char*s){if(!s)return-1;if(!strcasecmp(s,"4bit"))return 4;if(!strcasecmp(s,"8bit"))return 8;if(!strcasecmp(s,"16bit"))return 16;if(!strcasecmp(s,"24bit"))return 24;if(!strcasecmp(s,"32bit"))return 32;return-1;}
+typedef struct{StrVec images,original,modified;const char*format,*output,*output_dir,*resize,*extract,*diff_list,*list,*clut_format;bool dither,no_premult,swizzle,mipmaps,csm2,info,verify,diff,list_formats,help,version;}Options;
+static void usage(FILE*f,const char*p){fprintf(f,"PS2 TIM2 Converter - native C edition\nUsage:\n  %s <image(s)> --format <4bit|8bit|16bit|16s|24bit|32bit|8h|4hl|4hh> [options]\n  %s <file.tm2> --info | --verify | --extract png\n  %s --list convert.txt [options]\n  %s --diff --original a.tm2 --modified b.tm2\n\nOptions:\n  -f, --format FMT     output TIM2 format\n  -o, --output FILE    output for one input\n  --output-dir DIR     output folder\n  --no-premult         disable alpha premultiplication\n  --dither             Floyd-Steinberg dithering\n  --resize up|down     resize to a power of two (Lanczos-3)\n  --swizzle            pre-swizzle GS texture data\n  --mipmaps            append a full mipmap chain\n  --csm2               store indexed CLUT data sequentially (CSM2)\n  --clut-format FMT    CLUT format: 16, 16s, 24, or 32 (default 32)\n  --info               display TIM2 metadata\n  --verify             run structural checks\n  --extract EXT        png, jpg, jpeg, bmp, tga, tif, tiff, webp, ppm\n  --list FILE          batch list: <filename> <format>\n  --diff               compare files/folders\n  --original PATH...   original inputs for diff\n  --modified PATH...   modified inputs for diff\n  --diff-list FILE     pairs list (first content row is header)\n  -l, --list-formats   show supported formats\n  --version            show version\n  -h, --help           show this help\n",p,p,p,p);}
+static void list_formats(void){puts("Supported input formats:\n  .bmp, .dds, .gif, .ico, .jpeg, .jpg, .pbm, .pgm, .png, .ppm, .tga, .tif, .tiff, .webp\n\nOutput TIM2 formats:\n  --format 32bit    RGBA8888 | full color + 8-bit alpha\n  --format 24bit    RGB888   | full color, no alpha\n  --format 16bit    RGBA5551 | 32K colors + 1-bit alpha\n  --format 8bit     PSMT8    | 256 colors + CLUT\n  --csm2            sequential CLUT storage instead of CSM1\n  --format 4bit     PSMT4    | 16 colors + CLUT\n  --clut-format     16, 16s, 24, or 32-bit CLUT entries\n  --format 16s      PSMCT16S | RGBA5551 alternate layout\n  --format 8h       PSMT8H   | indexed high-byte lane\n  --format 4hl      PSMT4HL  | indexed high/low nibble lane\n  --format 4hh      PSMT4HH  | indexed high/high nibble lane\n\nExtraction: png, jpg/jpeg, bmp, tga, tif/tiff, webp, ppm\nAll codecs and processing are in-process; no external converter is invoked.");}
+static bool option_value(const char*s){return !strcmp(s,"--format")||!strcmp(s,"-f")||!strcmp(s,"--output")||!strcmp(s,"-o")||!strcmp(s,"--output-dir")||!strcmp(s,"--resize")||!strcmp(s,"--extract")||!strcmp(s,"--list")||!strcmp(s,"--diff-list")||!strcmp(s,"--clut-format");}
+static bool parse_options(int argc,char**argv,Options*o){memset(o,0,sizeof(*o));enum{NORMAL,ORIG,MOD}mode=NORMAL;for(int i=1;i<argc;i++){const char*a=argv[i];if(!strcmp(a,"--original")){mode=ORIG;continue;}if(!strcmp(a,"--modified")){mode=MOD;continue;}if(a[0]=='-'){mode=NORMAL;if(!strcmp(a,"-h")||!strcmp(a,"--help"))o->help=true;else if(!strcmp(a,"--version"))o->version=true;else if(!strcmp(a,"--dither"))o->dither=true;else if(!strcmp(a,"--no-premult"))o->no_premult=true;else if(!strcmp(a,"--swizzle"))o->swizzle=true;else if(!strcmp(a,"--mipmaps"))o->mipmaps=true;else if(!strcmp(a,"--csm2"))o->csm2=true;else if(!strcmp(a,"--info"))o->info=true;else if(!strcmp(a,"--verify"))o->verify=true;else if(!strcmp(a,"--diff"))o->diff=true;else if(!strcmp(a,"--list-formats")||!strcmp(a,"-l"))o->list_formats=true;else if(option_value(a)){if(++i>=argc){fprintf(stderr,"ERROR: %s requires a value\n",a);return false;}const char*v=argv[i];if(!strcmp(a,"--format")||!strcmp(a,"-f"))o->format=v;else if(!strcmp(a,"--output")||!strcmp(a,"-o"))o->output=v;else if(!strcmp(a,"--output-dir"))o->output_dir=v;else if(!strcmp(a,"--resize"))o->resize=v;else if(!strcmp(a,"--extract"))o->extract=v;else if(!strcmp(a,"--clut-format"))o->clut_format=v;else if(!strcmp(a,"--list"))o->list=v;else o->diff_list=v;}else{fprintf(stderr,"ERROR: unknown option '%s'\n",a);return false;}continue;}if(mode==ORIG)sv_add(&o->original,a);else if(mode==MOD)sv_add(&o->modified,a);else sv_add(&o->images,a);}return true;}
+static int fmt_number(const char*s){if(!s)return-1;if(!strcasecmp(s,"4bit")||!strcasecmp(s,"psmt4"))return 4;if(!strcasecmp(s,"8bit")||!strcasecmp(s,"psmt8"))return 8;if(!strcasecmp(s,"16bit")||!strcasecmp(s,"psmct16"))return 16;if(!strcasecmp(s,"24bit")||!strcasecmp(s,"psmct24"))return 24;if(!strcasecmp(s,"32bit")||!strcasecmp(s,"psmct32"))return 32;if(!strcasecmp(s,"16s")||!strcasecmp(s,"psmct16s"))return 161;if(!strcasecmp(s,"8h")||!strcasecmp(s,"psmt8h"))return 81;if(!strcasecmp(s,"4hl")||!strcasecmp(s,"psmt4hl"))return 41;if(!strcasecmp(s,"4hh")||!strcasecmp(s,"psmt4hh"))return 42;return-1;}
 static char*output_name(const char*src,const Options*o,const char*override){if(override)return xstrdup(override);if(o->output_dir)return join_output(o->output_dir,src,".tm2");return replace_ext(src,".tm2");}
 static void warn_dimensions_ps2(const char*n,int w,int h){if(is_power2(w)&&is_power2(h))return;printf("\n  WARNING: '%s' has non-power-of-2 dimensions (%dx%d).\n           PS2 requires power-of-2 sizes for reliable texture rendering.\n           Suggested: %dx%d (down) or %dx%d (up).\n",n,w,h,prev_power2(w),prev_power2(h),next_power2(w),next_power2(h));}
-static char*convert_one(const char*src,const char*fmt,const Options*o,const char*override){int f=fmt_number(fmt);if(f<0){set_error("unknown format '%s'",fmt?fmt:"");return NULL;}Image*im=load_image(src);if(!im)return NULL;warn_dimensions_ps2(path_base(src),im->w,im->h);if(o->resize){int nw,nh;if(!parse_resize(o->resize,im->w,im->h,&nw,&nh)||(!strcmp(o->resize,"up")&&!is_power2(nw))){image_free(im);return NULL;}if(strcasecmp(o->resize,"up")&&strcasecmp(o->resize,"down")){set_error("--resize accepts only up or down");image_free(im);return NULL;}if(nw!=im->w||nh!=im->h){Image*r=resize_lanczos(im,nw,nh);if(!r){image_free(im);return NULL;}printf("  Resized: %dx%d -> %dx%d (%s)\n",im->w,im->h,nw,nh,o->resize);image_free(im);im=r;}}
-    char*out=output_name(src,o,override);printf("  Converting: %s -> %s [%s]%s%s%s%s ... ",path_base(src),path_base(out),fmt,o->no_premult?" [no-premult]":" [premult]",o->dither?" [dither]":"",o->swizzle?" [swizzle]":"",o->mipmaps?" [mipmaps]":"");fflush(stdout);Buffer b={0};bool ok=build_tim2(im,f,!o->no_premult,o->dither,o->swizzle,o->mipmaps,&b);image_free(im);if(ok)ok=write_file(out,b.p,b.n);if(ok)printf("done (%.1f KB)\n",b.n/1024.0);else printf("FAILED (%s)\n",g_error);free(b.p);if(!ok){free(out);return NULL;}return out;}
+static char*convert_one(const char*src,const char*fmt,const Options*o,const char*override){int f=fmt_number(fmt);if(f<0){set_error("unknown format '%s'",fmt?fmt:"");return NULL;}if(o->mipmaps&&(f==4||f==8||f==41||f==42||f==81)){set_error("indexed mipmaps require a shared CLUT and are not supported yet");return NULL;}if(o->swizzle&&f==161){set_error("--swizzle is not available for PSMCT16S");return NULL;}Image*im=load_image(src);if(!im)return NULL;warn_dimensions_ps2(path_base(src),im->w,im->h);if(o->resize){int nw,nh;if(!parse_resize(o->resize,im->w,im->h,&nw,&nh)||(!strcmp(o->resize,"up")&&!is_power2(nw))){image_free(im);return NULL;}if(strcasecmp(o->resize,"up")&&strcasecmp(o->resize,"down")){set_error("--resize accepts only up or down");image_free(im);return NULL;}if(nw!=im->w||nh!=im->h){Image*r=resize_lanczos(im,nw,nh);if(!r){image_free(im);return NULL;}printf("  Resized: %dx%d -> %dx%d (%s)\n",im->w,im->h,nw,nh,o->resize);image_free(im);im=r;}}
+    char*out=output_name(src,o,override);printf("  Converting: %s -> %s [%s]%s%s%s%s ... ",path_base(src),path_base(out),fmt,o->no_premult?" [no-premult]":" [premult]",o->dither?" [dither]":"",o->swizzle?" [swizzle]":"",o->mipmaps?" [mipmaps]":"");fflush(stdout);Buffer b={0};bool ok=build_tim2(im,f,!o->no_premult,o->dither,o->swizzle,o->mipmaps,o->csm2,o->clut_format,&b);image_free(im);if(ok)ok=write_file(out,b.p,b.n);if(ok)printf("done (%.1f KB)\n",b.n/1024.0);else printf("FAILED (%s)\n",g_error);free(b.p);if(!ok){free(out);return NULL;}return out;}
 static char*trim(char*s){while(isspace((unsigned char)*s))s++;char*e=s+strlen(s);while(e>s&&isspace((unsigned char)e[-1]))*--e=0;return s;}
 static bool split_two(char*line,char**a,char**b){char*s=trim(line);if(!*s||*s=='#')return false;*a=s;while(*s&&!isspace((unsigned char)*s))s++;if(!*s){*b=NULL;return true;}*s++=0;s=trim(s);*b=s;while(*s&&!isspace((unsigned char)*s))s++;*s=0;return true;}
 static int run_batch(const Options*o){FILE*f=fopen(o->list,"r");if(!f){fprintf(stderr,"ERROR: cannot open list '%s'\n",o->list);return 1;}if(o->output_dir&&!mkdir_p(o->output_dir)){fprintf(stderr,"ERROR: %s\n",g_error);fclose(f);return 1;}char*line=NULL;size_t cap=0;ssize_t z;int ln=0,ok=0,fail=0;while((z=getline(&line,&cap,f))>=0){(void)z;ln++;char*a,*b;if(!split_two(line,&a,&b))continue;if(!b||fmt_number(b)<0){fprintf(stderr,"  FAILED (line %d): expected <filename> <format>\n",ln);fail++;continue;}char*out=convert_one(a,b,o,NULL);if(out){ok++;free(out);}else fail++;}free(line);fclose(f);printf("\nDone: %d succeeded, %d failed\n",ok,fail);return fail?1:0;}
 static int run_diff(const Options*o){if(o->original.n==1&&o->modified.n==1&&is_dir(o->original.v[0])&&is_dir(o->modified.v[0]))return diff_folders(o->original.v[0],o->modified.v[0]);int n=0,safe=0,warn=0,bad=0;if(o->original.n||o->modified.n){if(o->original.n!=o->modified.n){fprintf(stderr,"ERROR: original/modified counts must match\n");return 1;}for(size_t i=0;i<o->original.n;i++){DiffLevel z=diff_files(o->original.v[i],o->modified.v[i],true);n++;safe+=z==DIFF_SAFE;warn+=z==DIFF_WARNING;bad+=z==DIFF_UNSAFE;}}if(o->diff_list){FILE*f=fopen(o->diff_list,"r");if(!f){fprintf(stderr,"ERROR: cannot open diff list\n");return 1;}char*line=NULL;size_t cap=0;ssize_t z;bool header=false;while((z=getline(&line,&cap,f))>=0){(void)z;char*a,*b;if(!split_two(line,&a,&b))continue;if(!header){header=true;continue;}if(!b){fprintf(stderr,"ERROR: malformed diff-list row\n");continue;}DiffLevel q=diff_files(a,b,true);n++;safe+=q==DIFF_SAFE;warn+=q==DIFF_WARNING;bad+=q==DIFF_UNSAFE;}free(line);fclose(f);}if(!n){fprintf(stderr,"ERROR: no files to compare\n");return 1;}if(n>1)diff_summary(n,safe,warn,bad);return bad?1:0;}
-int main(int argc,char**argv){Options o;if(!parse_options(argc,argv,&o)){usage(stderr,argv[0]);return 2;}int rc=0;if(o.help){usage(stdout,argv[0]);goto done;}if(o.version){printf("ps2_tim2_tool %s\n",PS2_TOOL_VERSION);goto done;}if(o.diff||o.diff_list){rc=run_diff(&o);goto done;}if(o.extract){char ext[32];snprintf(ext,sizeof(ext),"%s%s",o.extract[0]=='.'?"":".",o.extract);if(strcasecmp(ext,".png")&&strcasecmp(ext,".jpg")&&strcasecmp(ext,".jpeg")&&strcasecmp(ext,".bmp")&&strcasecmp(ext,".tga")&&strcasecmp(ext,".tif")&&strcasecmp(ext,".tiff")&&strcasecmp(ext,".webp")&&strcasecmp(ext,".ppm")){fprintf(stderr,"ERROR: unsupported extract format '%s'\n",o.extract);rc=1;goto done;}if(!o.images.n){fprintf(stderr,"ERROR: provide TIM2 file(s) with --extract\n");rc=1;goto done;}int ok=0,fail=0;for(size_t i=0;i<o.images.n;i++){char*out=NULL;printf("  Extracting: %s ... ",path_base(o.images.v[i]));if(extract_tim2(o.images.v[i],ext,&out)){printf("done -> %s\n",out);free(out);ok++;}else{printf("FAILED (%s)\n",g_error);fail++;}}printf("Done: %d succeeded, %d failed\n",ok,fail);rc=fail?1:0;goto done;}if(o.verify){if(!o.images.n){fprintf(stderr,"ERROR: provide TIM2 file(s) with --verify\n");rc=1;goto done;}bool all=true;for(size_t i=0;i<o.images.n;i++)if(!verify_tim2_file(o.images.v[i]))all=false;puts(all?"All files verified successfully.":"One or more files failed verification.");rc=all?0:1;goto done;}if(o.info){if(!o.images.n){fprintf(stderr,"ERROR: provide TIM2 file(s) with --info\n");rc=1;goto done;}for(size_t i=0;i<o.images.n;i++)if(!tim2_info_file(o.images.v[i])){fprintf(stderr,"FAILED: %s (%s)\n",o.images.v[i],g_error);rc=1;}goto done;}if(o.list){rc=run_batch(&o);goto done;}if(o.list_formats||!o.images.n){list_formats();goto done;}if(fmt_number(o.format)<0){fprintf(stderr,"ERROR: --format is required: 4bit|8bit|16bit|24bit|32bit\n");rc=1;goto done;}if(o.output_dir&&!mkdir_p(o.output_dir)){fprintf(stderr,"ERROR: %s\n",g_error);rc=1;goto done;}if(o.output&&o.images.n>1)fprintf(stderr,"WARNING: --output ignored for multiple inputs\n");printf("Converting %zu file(s) -> [%s]\n\n",o.images.n,o.format);int ok=0,fail=0;for(size_t i=0;i<o.images.n;i++){char*out=convert_one(o.images.v[i],o.format,&o,o.images.n==1?o.output:NULL);if(out){ok++;free(out);}else fail++;}printf("\nDone: %d succeeded, %d failed\n",ok,fail);rc=fail?1:0;done:sv_free(&o.images);sv_free(&o.original);sv_free(&o.modified);return rc;}
+int main(int argc,char**argv){Options o;if(!parse_options(argc,argv,&o)){usage(stderr,argv[0]);return 2;}int rc=0;if(o.help){usage(stdout,argv[0]);goto done;}if(o.version){printf("ps2_tim2_tool %s\n",PS2_TOOL_VERSION);goto done;}if(o.diff||o.diff_list){rc=run_diff(&o);goto done;}if(o.extract){char ext[32];snprintf(ext,sizeof(ext),"%s%s",o.extract[0]=='.'?"":".",o.extract);if(strcasecmp(ext,".png")&&strcasecmp(ext,".jpg")&&strcasecmp(ext,".jpeg")&&strcasecmp(ext,".bmp")&&strcasecmp(ext,".tga")&&strcasecmp(ext,".tif")&&strcasecmp(ext,".tiff")&&strcasecmp(ext,".webp")&&strcasecmp(ext,".ppm")){fprintf(stderr,"ERROR: unsupported extract format '%s'\n",o.extract);rc=1;goto done;}if(!o.images.n){fprintf(stderr,"ERROR: provide TIM2 file(s) with --extract\n");rc=1;goto done;}int ok=0,fail=0;for(size_t i=0;i<o.images.n;i++){char*out=NULL;printf("  Extracting: %s ... ",path_base(o.images.v[i]));if(extract_tim2(o.images.v[i],ext,&out)){printf("done -> %s\n",out);free(out);ok++;}else{printf("FAILED (%s)\n",g_error);fail++;}}printf("Done: %d succeeded, %d failed\n",ok,fail);rc=fail?1:0;goto done;}if(o.verify){if(!o.images.n){fprintf(stderr,"ERROR: provide TIM2 file(s) with --verify\n");rc=1;goto done;}bool all=true;for(size_t i=0;i<o.images.n;i++)if(!verify_tim2_file(o.images.v[i]))all=false;puts(all?"All files verified successfully.":"One or more files failed verification.");rc=all?0:1;goto done;}if(o.info){if(!o.images.n){fprintf(stderr,"ERROR: provide TIM2 file(s) with --info\n");rc=1;goto done;}for(size_t i=0;i<o.images.n;i++)if(!tim2_info_file(o.images.v[i])){fprintf(stderr,"FAILED: %s (%s)\n",o.images.v[i],g_error);rc=1;}goto done;}if(o.list){rc=run_batch(&o);goto done;}if(o.list_formats||!o.images.n){list_formats();goto done;}if(fmt_number(o.format)<0){fprintf(stderr,"ERROR: --format is required: 4bit|8bit|16bit|16s|24bit|32bit|8h|4hl|4hh\n");rc=1;goto done;}if(o.output_dir&&!mkdir_p(o.output_dir)){fprintf(stderr,"ERROR: %s\n",g_error);rc=1;goto done;}if(o.output&&o.images.n>1)fprintf(stderr,"WARNING: --output ignored for multiple inputs\n");printf("Converting %zu file(s) -> [%s]\n\n",o.images.n,o.format);int ok=0,fail=0;for(size_t i=0;i<o.images.n;i++){char*out=convert_one(o.images.v[i],o.format,&o,o.images.n==1?o.output:NULL);if(out){ok++;free(out);}else fail++;}printf("\nDone: %d succeeded, %d failed\n",ok,fail);rc=fail?1:0;done:sv_free(&o.images);sv_free(&o.original);sv_free(&o.modified);return rc;}
