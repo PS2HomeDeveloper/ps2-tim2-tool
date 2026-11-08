@@ -41,11 +41,10 @@ Prebuilt executables built from the C version are published on the [Releases](ht
 
 | Platform | Architectures | File name pattern |
 |---|---|---|
-| Windows | x86_64, x86, arm64 | `ps2_tim2_tool_windows_<arch>.exe` |
-| Linux | x86_64, x86, arm64 | `ps2_tim2_tool_linux_<arch>` |
+| Windows | x86_64, x86, arm64, arm32 | `ps2_tim2_tool_windows_<arch>.exe` |
+| Linux | x86_64, x86, arm64, arm32 | `ps2_tim2_tool_linux_<arch>` |
 | macOS | arm64, x86_64 | `ps2_tim2_tool_macos_<arch>` |
 | Android | arm64-v8a, armeabi-v7a, x86, x86_64 | `ps2_tim2_tool_android_<arch>` |
-| iOS | arm64, x86_64 (simulator) | `ps2_tim2_tool_ios_<arch>` |
 
 On Linux, macOS and Android, make the file executable first:
 
