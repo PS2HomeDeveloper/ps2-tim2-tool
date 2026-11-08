@@ -7,7 +7,7 @@ permissions:
   contents: write
 
 env:
-  SRC_PATH: src/c/ps2-tim2-tool.c
+  SRC_PATH: src/c/ps2_tim2_tool.c
 
 jobs:
 
@@ -203,8 +203,8 @@ jobs:
 
       - name: Install LLVM-MinGW
         run: |
-          LLVM_MINGW_VERSION=20250114
-          curl -L "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_VERSION/llvm-mingw-$LLVM_MINGW_VERSION-ucrt-ubuntu-22.04-x86_64.tar.xz" -o llvm-mingw.tar.xz
+          LLVM_MINGW_VERSION=20260922
+          curl -fL "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_VERSION/llvm-mingw-$LLVM_MINGW_VERSION-ucrt-ubuntu-24.04-x86_64.tar.xz" -o llvm-mingw.tar.xz
           mkdir llvm-mingw
           tar -xJf llvm-mingw.tar.xz -C llvm-mingw --strip-components=1
           LLVM_BIN="$PWD/llvm-mingw/bin"
@@ -245,7 +245,7 @@ jobs:
 
   build-linux-arm32:
     needs: cleanup
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
