@@ -203,8 +203,8 @@ jobs:
 
       - name: Install LLVM-MinGW
         run: |
-          LLVM_MINGW_VERSION=20260922
-          curl -fL "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_VERSION/llvm-mingw-$LLVM_MINGW_VERSION-ucrt-ubuntu-24.04-x86_64.tar.xz" -o llvm-mingw.tar.xz
+          LLVM_MINGW_VERSION=20261104
+          curl -fL "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_VERSION/llvm-mingw-$LLVM_MINGW_VERSION-ucrt-ubuntu-22.04-x86_64.tar.xz" -o llvm-mingw.tar.xz
           mkdir llvm-mingw
           tar -xJf llvm-mingw.tar.xz -C llvm-mingw --strip-components=1
           LLVM_BIN="$PWD/llvm-mingw/bin"
@@ -230,10 +230,31 @@ jobs:
         run: |
           mkdir -p dist
           VCPKG_DIR="vcpkg/installed/arm-mingw-dynamic"
-          armv7-w64-mingw32-clang -O3 -flto -std=gnu11 -Wall -Wextra \\
-            -I"$VCPKG_DIR/include" -L"$VCPKG_DIR/lib" \\
-            "$SRC_PATH" \\
-            -lpng -ljpeg -lgif -ltiff -lwebp -lz -lm \\
+          cat > /tmp/win_prelude.h <<'PRELUDE_EOF'
+          #include <sys/stat.h>
+          #include <sys/types.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #define mkdir(path, mode) mkdir(path)
+          static ssize_t compat_getline(char **lineptr, size_t *n, FILE *stream) {
+              if (*lineptr == NULL || *n == 0) { *n = 256; *lineptr = (char *)malloc(*n); if (*lineptr == NULL) return -1; }
+              size_t pos = 0; int c;
+              while ((c = fgetc(stream)) != EOF) {
+                  if (pos + 1 >= *n) { *n *= 2; char *p = (char *)realloc(*lineptr, *n); if (p == NULL) return -1; *lineptr = p; }
+                  (*lineptr)[pos++] = (char)c;
+                  if (c == '\n') break;
+              }
+              if (pos == 0) return -1;
+              (*lineptr)[pos] = '\0';
+              return (ssize_t)pos;
+          }
+          #define getline compat_getline
+          PRELUDE_EOF
+          armv7-w64-mingw32-clang -O3 -flto -std=gnu11 -Wall -Wextra \
+            -include /tmp/win_prelude.h \
+            -I"$VCPKG_DIR/include" -L"$VCPKG_DIR/lib" \
+            "$SRC_PATH" \
+            -lpng16 -ljpeg -lgif -ltiff -lwebp -lsharpyuv -lz -lm \
             -o "dist/ps2-tim2-tool-windows-arm.exe"
 
       - name: Upload to v1.0.0 release
@@ -253,17 +274,33 @@ jobs:
       - name: Install ARM32 cross compiler and dependencies
         run: |
           sudo dpkg --add-architecture armhf
+          sudo rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources
+          sudo tee /etc/apt/sources.list.d/ubuntu.sources >/dev/null <<'EOF'
+          Types: deb
+          URIs: http://archive.ubuntu.com/ubuntu/
+          Suites: noble noble-updates noble-backports noble-security
+          Components: main universe restricted multiverse
+          Architectures: amd64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports/
+          Suites: noble noble-updates noble-backports noble-security
+          Components: main universe restricted multiverse
+          Architectures: armhf
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+          EOF
           sudo apt-get update
-          sudo apt-get install -y gcc-arm-linux-gnueabihf \\
-            libpng-dev:armhf libjpeg-dev:armhf libgif-dev:armhf \\
+          sudo apt-get install -y gcc-arm-linux-gnueabihf \
+            libpng-dev:armhf libjpeg-dev:armhf libgif-dev:armhf \
             libtiff-dev:armhf libwebp-dev:armhf
 
       - name: Build (linux-arm)
         run: |
           mkdir -p dist
-          arm-linux-gnueabihf-gcc -O3 -flto -std=c11 -Wall -Wextra \\
-            "$SRC_PATH" \\
-            -lpng -ljpeg -lgif -ltiff -lwebp -lz -lm \\
+          arm-linux-gnueabihf-gcc -O3 -flto -std=c11 -Wall -Wextra \
+            "$SRC_PATH" \
+            -lpng -ljpeg -lgif -ltiff -lwebp -lz -lm \
             -o "dist/ps2-tim2-tool-linux-arm"
 
       - name: Upload to v1.0.0 release
@@ -274,7 +311,7 @@ jobs:
 
   build-macos-arm64:
     needs: cleanup
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -301,7 +338,7 @@ jobs:
 
   build-macos-x86_64:
     needs: cleanup
-    runs-on: macos-14
+    runs-on: macos-15-intel
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
