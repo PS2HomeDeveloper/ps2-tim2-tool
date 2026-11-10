@@ -1,4 +1,3 @@
-A
 # PS2 TIM2 Tool
 
 ⭐ If this tool saved you time, consider starring the repo. It helps others find it too.
