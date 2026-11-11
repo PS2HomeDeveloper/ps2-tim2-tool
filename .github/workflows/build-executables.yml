@@ -53,12 +53,7 @@ jobs:
             msystem: MINGW64
             pkg_prefix: mingw-w64-x86_64
             compiler: gcc
-          - target: windows_x86
-            artifact: windows-x86
-            runner: windows-latest
-            msystem: MINGW32
-            pkg_prefix: mingw-w64-i686
-            compiler: gcc
+
           - target: windows_arm64
             artifact: windows-arm64
             runner: windows-11-arm
@@ -187,6 +182,81 @@ jobs:
         run: |
           gh release upload "${{ needs.cleanup.outputs.release_tag }}" "dist/ps2-tim2-tool-${{ matrix.artifact }}" --repo "$GITHUB_REPOSITORY" --clobber
 
+
+
+  build-windows-x86:
+    needs: cleanup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl xz-utils git cmake ninja-build pkg-config
+
+      - name: Install LLVM-MinGW
+        run: |
+          LLVM_MINGW_VERSION=20261104
+          curl -fL "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_VERSION/llvm-mingw-$LLVM_MINGW_VERSION-ucrt-ubuntu-22.04-x86_64.tar.xz" -o llvm-mingw.tar.xz
+          mkdir llvm-mingw
+          tar -xJf llvm-mingw.tar.xz -C llvm-mingw --strip-components=1
+          LLVM_BIN="$PWD/llvm-mingw/bin"
+          ln -sf i686-w64-mingw32-clang "$LLVM_BIN/i686-w64-mingw32-gcc"
+          ln -sf i686-w64-mingw32-clang++ "$LLVM_BIN/i686-w64-mingw32-g++"
+          ln -sf llvm-ar "$LLVM_BIN/i686-w64-mingw32-ar"
+          ln -sf llvm-ranlib "$LLVM_BIN/i686-w64-mingw32-ranlib"
+          echo "$LLVM_BIN" >> "$GITHUB_PATH"
+
+      - name: Bootstrap vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git
+          ./vcpkg/bootstrap-vcpkg.sh
+
+      - name: Build Windows x86 dependencies
+        run: |
+          export PATH="$PWD/llvm-mingw/bin:$PATH"
+          export CC=i686-w64-mingw32-clang
+          export CXX=i686-w64-mingw32-clang++
+          ./vcpkg/vcpkg install libpng libjpeg-turbo giflib tiff libwebp --triplet=x86-mingw-dynamic
+
+      - name: Build (windows-x86)
+        run: |
+          mkdir -p dist
+          VCPKG_DIR="vcpkg/installed/x86-mingw-dynamic"
+          cat > /tmp/win_prelude.h <<'PRELUDE_EOF'
+          #include <sys/stat.h>
+          #include <sys/types.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #define mkdir(path, mode) mkdir(path)
+          static ssize_t compat_getline(char **lineptr, size_t *n, FILE *stream) {
+              if (*lineptr == NULL || *n == 0) { *n = 256; *lineptr = (char *)malloc(*n); if (*lineptr == NULL) return -1; }
+              size_t pos = 0; int c;
+              while ((c = fgetc(stream)) != EOF) {
+                  if (pos + 1 >= *n) { *n *= 2; char *p = (char *)realloc(*lineptr, *n); if (p == NULL) return -1; *lineptr = p; }
+                  (*lineptr)[pos++] = (char)c;
+                  if (c == '\n') break;
+              }
+              if (pos == 0) return -1;
+              (*lineptr)[pos] = '\0';
+              return (ssize_t)pos;
+          }
+          #define getline compat_getline
+          PRELUDE_EOF
+          i686-w64-mingw32-clang -O3 -flto -std=gnu11 -Wall -Wextra \
+            -include /tmp/win_prelude.h \
+            -I"$VCPKG_DIR/include" -L"$VCPKG_DIR/lib" \
+            "$SRC_PATH" \
+            -lpng16 -ljpeg -lgif -ltiff -lwebp -lsharpyuv -lz -lm \
+            -o "dist/ps2-tim2-tool-windows-x86.exe"
+
+      - name: Upload to latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ needs.cleanup.outputs.release_tag }}" "dist/ps2-tim2-tool-windows-x86.exe" --repo "$GITHUB_REPOSITORY" --clobber
 
   build-windows-arm32:
     needs: cleanup
