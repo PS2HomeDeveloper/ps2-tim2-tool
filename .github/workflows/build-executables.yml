@@ -1,7 +1,25 @@
 name: Build Executables
 
+# Builds all platform binaries and uploads them to the LATEST GitHub release,
+# replacing assets with the same name. No version tag is hardcoded:
+#   - the latest release is detected automatically
+#   - if the repo has no release yet, one is created using `default_tag`
+
 on:
   workflow_dispatch:
+    inputs:
+      default_tag:
+        description: "Tag to create ONLY if the repository has no release yet"
+        type: string
+        default: "v1.0.0"
+      move_tag:
+        description: "Move the release tag to the current commit (keeps the release in sync with the source)"
+        type: boolean
+        default: true
+      clean_assets:
+        description: "Delete all existing release assets before building (stale files are removed, but a failed build leaves a gap)"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -11,39 +29,55 @@ env:
 
 jobs:
 
-  cleanup:
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Move v1.0.0 tag to latest commit
+      - name: Find latest release (or create the first one)
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_TAG: ${{ inputs.default_tag }}
+        run: |
+          TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName 2>/dev/null || true)
+          if [ -z "$TAG" ]; then
+            TAG="$DEFAULT_TAG"
+            echo "No release found, creating $TAG"
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" --notes "Prebuilt executables" --target "$GITHUB_SHA"
+          fi
+          echo "Using release: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Move release tag to latest commit
+        if: ${{ inputs.move_tag }}
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -f v1.0.0
-          git push origin v1.0.0 --force
-
-      - name: Ensure release exists
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release view v1.0.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create v1.0.0 --repo "$GITHUB_REPOSITORY" --title "v1.0.0" --notes "Prebuilt executables"
+          git tag -f "$TAG"
+          git push origin "refs/tags/$TAG" --force
 
       - name: Delete existing release assets
+        if: ${{ inputs.clean_assets }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
-          for name in $(gh release view v1.0.0 --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name'); do
+          for name in $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name'); do
             echo "Deleting: $name"
-            gh release delete-asset v1.0.0 "$name" --repo "$GITHUB_REPOSITORY" -y
+            gh release delete-asset "$TAG" "$name" --repo "$GITHUB_REPOSITORY" -y
           done
 
   build-windows:
-    needs: cleanup
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -129,15 +163,16 @@ jobs:
             -lpng -ljpeg -lgif -ltiff -lwebp -lz -lm \
             -o "dist/ps2-tim2-tool-${{ matrix.artifact }}.exe"
 
-      - name: Upload to v1.0.0 release
+      - name: Upload to latest release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          gh release upload v1.0.0 "dist/ps2-tim2-tool-${{ matrix.artifact }}.exe" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" "dist/ps2-tim2-tool-${{ matrix.artifact }}.exe" --repo "$GITHUB_REPOSITORY" --clobber
 
   build-linux:
-    needs: cleanup
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -182,15 +217,16 @@ jobs:
             -lpng -ljpeg -lgif -ltiff -lwebp -lz -lm \
             -o "dist/ps2-tim2-tool-${{ matrix.artifact }}"
 
-      - name: Upload to v1.0.0 release
+      - name: Upload to latest release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          gh release upload v1.0.0 "dist/ps2-tim2-tool-${{ matrix.artifact }}" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" "dist/ps2-tim2-tool-${{ matrix.artifact }}" --repo "$GITHUB_REPOSITORY" --clobber
 
 
   build-windows-arm32:
-    needs: cleanup
+    needs: prepare
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -257,15 +293,16 @@ jobs:
             -lpng16 -ljpeg -lgif -ltiff -lwebp -lsharpyuv -lz -lm \
             -o "dist/ps2-tim2-tool-windows-arm.exe"
 
-      - name: Upload to v1.0.0 release
+      - name: Upload to latest release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          gh release upload v1.0.0 "dist/ps2-tim2-tool-windows-arm.exe" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" "dist/ps2-tim2-tool-windows-arm.exe" --repo "$GITHUB_REPOSITORY" --clobber
 
 
   build-linux-arm32:
-    needs: cleanup
+    needs: prepare
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -303,14 +340,15 @@ jobs:
             -lpng -ljpeg -lgif -ltiff -lwebp -lz -lm \
             -o "dist/ps2-tim2-tool-linux-arm"
 
-      - name: Upload to v1.0.0 release
+      - name: Upload to latest release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          gh release upload v1.0.0 "dist/ps2-tim2-tool-linux-arm" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" "dist/ps2-tim2-tool-linux-arm" --repo "$GITHUB_REPOSITORY" --clobber
 
   build-macos-arm64:
-    needs: cleanup
+    needs: prepare
     runs-on: macos-15
     steps:
       - name: Checkout repository
@@ -330,14 +368,15 @@ jobs:
             -lpng -ljpeg -lgif -ltiff -lwebp -lz -lm \
             -o "dist/ps2-tim2-tool-macos-arm64"
 
-      - name: Upload to v1.0.0 release
+      - name: Upload to latest release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          gh release upload v1.0.0 "dist/ps2-tim2-tool-macos-arm64" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" "dist/ps2-tim2-tool-macos-arm64" --repo "$GITHUB_REPOSITORY" --clobber
 
   build-macos-x86_64:
-    needs: cleanup
+    needs: prepare
     runs-on: macos-15-intel
     steps:
       - name: Checkout repository
@@ -362,14 +401,15 @@ jobs:
             -lpng16 -ljpeg -lgif -ltiff -llzma -lwebp -lsharpyuv -lz -lm \
             -o "dist/ps2-tim2-tool-macos-x86_64"
 
-      - name: Upload to v1.0.0 release
+      - name: Upload to latest release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          gh release upload v1.0.0 "dist/ps2-tim2-tool-macos-x86_64" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" "dist/ps2-tim2-tool-macos-x86_64" --repo "$GITHUB_REPOSITORY" --clobber
 
   build-android:
-    needs: cleanup
+    needs: prepare
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -428,9 +468,10 @@ jobs:
             -static-libgcc \
             -o "dist/ps2-tim2-tool-android-${{ matrix.arch }}"
 
-      - name: Upload to v1.0.0 release
+      - name: Upload to latest release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          gh release upload v1.0.0 "dist/ps2-tim2-tool-android-${{ matrix.arch }}" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" "dist/ps2-tim2-tool-android-${{ matrix.arch }}" --repo "$GITHUB_REPOSITORY" --clobber
 
