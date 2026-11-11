@@ -91,6 +91,7 @@ IMG_INDEXED8      = 0x05    # 8-bit indexed
 
 # ─── CLUT Type  (byte 17 in the Picture Block Header) ─────────────────────────
 CLUT_NONE   = 0x00          # no CLUT  (32-bit and 16-bit)
+CLUT_RGBA16 = 0x01          # CLUT in 16-bit RGBA5551
 CLUT_RGB32  = 0x02          # CLUT in 32-bit RGB (unused high byte)
 CLUT_RGBA32 = 0x03          # CLUT in 32-bit RGBA
 
@@ -1942,7 +1943,7 @@ def extract_tm2(src_path: Path, out_ext: str) -> str:
     img_size    = struct.unpack_from('<I', data, off +  8)[0]
     hdr_size    = struct.unpack_from('<H', data, off + 12)[0]
     clut_colors = struct.unpack_from('<H', data, off + 14)[0]
-    clut_type   = data[off + 17]
+    clut_type   = data[off + 18]
     img_type    = data[off + 19]
     gs_tex0     = struct.unpack_from('<Q', data, off + 24)[0]
     width       = struct.unpack_from('<H', data, off + 20)[0]
@@ -2183,7 +2184,7 @@ Examples:
   {PROG} font1.tm2      --info
   {PROG} --list tex.txt
   {PROG}                --list-formats
-        """
+        """.replace('{PROG}', PROG)
     )
     parser.add_argument('images',          nargs='*',
                         help='Input image files (PNG, JPG, BMP, TGA, ...) or .tm2 with --info')
@@ -2323,6 +2324,8 @@ Examples:
             print('\nOutput files:')
             for o in outputs:
                 print(f'  {o}')
+        if fail:
+            sys.exit(1)
         return
 
     # ─── Mode --verify: verify the validity of a TIM2 file ──────────────────────────────
@@ -2394,6 +2397,8 @@ Examples:
             print('\nOutput files:')
             for o in outputs:
                 print(f'  {o}')
+        if fail:
+            sys.exit(1)
         return
 
     # ─── Default mode: convert files from command line ──────────────────────
@@ -2443,6 +2448,8 @@ Examples:
         print('\nOutput files:')
         for o in outputs:
             print(f'  {o}')
+    if fail:
+        sys.exit(1)
 
 
 if __name__ == '__main__':
